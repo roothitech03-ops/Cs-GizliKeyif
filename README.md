@@ -1,8 +1,8 @@
 # 📺 cs-gizlikeyif
 
-**Kısa kod** = **gizlikeyif**
+**Kısa kod** = **https://raw.githubusercontent.com/roothitech03-ops/Cs-GizliKeyif/refs/heads/master/repo.json**
 
-**Short Code** = **gizlikeyif**
+**Short Code** = **https://raw.githubusercontent.com/roothitech03-ops/Cs-GizliKeyif/refs/heads/master/repo.json**
 
 ## ❗Uyarı - ❗Disclaimer
 
