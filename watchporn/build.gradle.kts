@@ -8,5 +8,5 @@ cloudstream {
     description = "High quality adult streams from WatchPorn.to - Taboo & Step-family content"
     
     version = 1
-    apiVersion = 20
+    // apiVersion = 20
 }
