@@ -1,10 +1,7 @@
 package com.kraptor
 
 import com.lagradost.cloudstream3.*
-import com.lagradost.cloudstream3.utils.ExtractorLink
-import com.lagradost.cloudstream3.utils.Quality
-import com.lagradost.cloudstream3.utils.Qualities
-import com.lagradost.cloudstream3.utils.loadExtractor
+import com.lagradost.cloudstream3.utils.*
 import org.jsoup.nodes.Element
 import java.net.URI
 
@@ -14,107 +11,101 @@ class WatchPorn : MainApi() {
     override val lang = "en"
     override val supportedTypes = setOf(TvType.NSFW)
     override val hasMainPage = true
-    override val hasChromecastSupport = true
-    override val hasDownloadSupport = true
 
-    companion object {
-        private val SEARCH_URL = "$mainUrl/search/%s/"
-        private val headers = mapOf("Referer" to mainUrl, "User-Agent" to "Mozilla/5.0")
-    }
+    private val headers = mapOf(
+        "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Referer" to mainUrl
+    )
 
-    private fun Element.toNSFWSearchResponse(): SearchResponse? {
-        val link = selectFirst("a[href]")?.attr("href") ?: return null
-        val title = selectFirst("h3, h4, .title, .name, .video-title")?.text()
-            ?: selectFirst("a")?.ownText()?.trim()?.takeIf { it.isNotBlank() } ?: return null
+    private fun Element.toSearchResponse(): SearchResponse? {
+        val link = selectFirst("a")?.attr("href") ?: return null
+        val title = selectFirst("h3, h4, .title")?.text()?.trim()
+            ?: selectFirst("a")?.text()?.trim() ?: return null
         
-        val poster = selectFirst("img")?.attr("data-src") 
-            ?: selectFirst("img")?.attr("src")
-            ?: selectFirst("img")?.attr("data-lazy-src")
-
-        val fullUrl = if (link.startsWith("http")) link else "$mainUrl$link"
+        val poster = selectFirst("img")?.attr("src") ?: 
+                    selectFirst("img")?.attr("data-src")
         
+        val fullUrl = fixUrl(link)
         return NSFWSearchResponse(
             title,
             fullUrl,
             this@WatchPorn.name,
-            poster,
-            tags = listOf(selectFirst(".tags, .category, .video-cat")?.text()?.trim() ?: "")
+            TvType.NSFW,
+            poster
         )
     }
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val mainDoc = app.get(mainUrl, headers = headers).document
+        val doc = app.get(mainUrl, headers = headers).document
         
-        // Latest/Trending videos
-        val latestVideos = mainDoc.select("div[class*='video-item'], div[class*='thumb-item'], div[class*='post-item'], .video-block")
-            .distinctBy { it.selectFirst("a")?.attr("href") }
-            .mapNotNull { it.toNSFWSearchResponse() }
-            .take(24)
+        val trending = doc.select("div[class*='video'], div[class*='thumb'], div[class*='item']")
+            .mapNotNull { it.toSearchResponse() }
+            .take(20)
 
-        // Categories
-        val catDoc = app.get("$mainUrl/category", headers = headers).document
-        val categories = catDoc.select("a[href*='/category/'], .cat-item a, .category-list a")
-            .distinctBy { it.attr("href") }
-            .mapNotNull { element ->
-                val catName = element.text().trim().takeIf { it.isNotBlank() } ?: return@mapNotNull null
-                val catUrl = if (element.attr("href").startsWith("/")) "$mainUrl${element.attr("href")}" 
-                           else element.attr("href")
-                HomePageList(
-                    catName, 
-                    loadVideosFromPage(catUrl),
-                    isCategoryList = true
-                )
-            }
-            .take(12)
-
-        return HomePageResponse(
-            listOfNotNull(
-                HomePageList("🔥 Latest Videos", latestVideos),
-                if (categories.isNotEmpty()) HomePageList("📂 Categories", categories) else null
-            )
-        )
+        return HomePageResponse(listOf(
+            HomePageList("Trending", trending)
+        ))
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        val encodedQuery = URI(null, query.lowercase().replace(" ", "-").replace("[^a-z0-9-]".toRegex(), ""), null).rawPath
-        val url = SEARCH_URL.format(encodedQuery)
-        return loadVideosFromPage(url)
-    }
-
-    private suspend fun loadVideosFromPage(pageUrl: String): List<SearchResponse> {
-        return app.get(pageUrl, headers = headers).document
-            .select("div[class*='video-item'], div[class*='thumb'], div[class*='item'], .post-item, .video-grid-item")
-            .distinctBy { it.selectFirst("a[href]")?.attr("href") }
-            .mapNotNull { it.toNSFWSearchResponse() }
-            .take(30)
+        val searchUrl = "https://watchporn.to/search/${query.lowercase().replace(" ", "-")}/"
+        val doc = app.get(searchUrl, headers = headers).document
+        return doc.select("div[class*='video'], div[class*='thumb']")
+            .mapNotNull { it.toSearchResponse() }
     }
 
     override suspend fun load(url: String): LoadResponse {
         val doc = app.get(url, headers = headers).document
         
-        val title = doc.selectFirst("h1.entry-title, h1.post-title, h1, title")?.text()
-            ?.trim()?.substringBeforeLast(" -")?.substringBeforeLast("|")?.takeIf { it.length > 3 }
-            ?: throw ErrorLoadingException("Title not found")
-
-        val poster = doc.selectFirst(".single-poster img, .post-thumb img, meta[property='og:image']")?.attr("content")
-            ?: doc.selectFirst(".post-image img, .featured-image img")?.attr("src")
-            ?: doc.selectFirst("img[alt*=$title], meta[property='og:image']")?.attr("content")
-
-        val description = doc.selectFirst(".entry-content p:first-child, .post-description, .video-desc")?.text()?.trim()
-        val tags = doc.select("a.tag, .post-tag a, .category a")
-            .mapNotNull { it.text().trim().takeIf { it.isNotBlank() } }
-            .distinct()
-            .take(15)
-
-        // Recommendations
-        val recLinks = doc.select(".related-videos a, .you-may-like a, .recommended-videos a, .similar-videos a")
-            .mapNotNull { it.attr("href").takeIf { it.contains("/video/") || it.contains("/watch/") } }
-            .distinct()
-            .take(20)
+        val title = doc.selectFirst("h1")?.text()?.trim() 
+            ?: doc.title()?.substringBefore(" | ") ?: "Unknown"
         
-        val recommendations = recLinks.mapNotNull { recUrl ->
-            val recFullUrl = if (recUrl.startsWith("http")) recUrl else "$mainUrl$recUrl"
-            NSFWSearchResponse(
+        val poster = doc.selectFirst("meta[property='og:image']")?.attr("content")
+            ?: doc.selectFirst(".poster img, .thumb img")?.attr("src")
+
+        return NSFWLoadResponse(
+            name = title,
+            url = url,
+            apiName = name,
+            type = TvType.NSFW,
+            posterUrl = poster
+        )
+    }
+
+    override suspend fun loadLinks(
+        data: String,
+        isEmbedding: Boolean,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ) {
+        val doc = app.get(data, headers = headers).document
+        
+        // Iframe extraction
+        doc.select("iframe").forEach { iframe ->
+            val src = iframe.attr("src").ifEmpty { iframe.attr("data-src") }
+            if (src.isNotBlank()) {
+                loadExtractor(src, mainUrl, subtitleCallback, callback)
+            }
+        }
+        
+        // Direct sources
+        val text = app.get(data).text
+        Regex("https?://[^\\s\"']+\\.(m3u8|mp4)").findAll(text).toList()
+            .forEach { match ->
+                callback(ExtractorLink(
+                    name,
+                    "Direct",
+                    match.value,
+                    referer = mainUrl,
+                    quality = Quality.Unknown
+                ))
+            }
+    }
+    
+    private fun fixUrl(url: String): String {
+        return if (url.startsWith("http")) url else "$mainUrl$url"
+    }
+}            NSFWSearchResponse(
                 doc.select("a[href*=$recUrl]")?.firstOrNull()?.text()?.trim() ?: "Related",
                 recFullUrl,
                 name
