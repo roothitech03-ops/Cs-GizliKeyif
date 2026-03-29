@@ -29,7 +29,6 @@ class WatchPorn(context: Context) : MainAPI() {
     private val context = context
 
     override val mainPage = mainPageOf(
-        "${mainUrl}/latest-updates/"                    to "latest"
         "${mainUrl}/top-rated/"           to "Top Rated",
         "${mainUrl}/most-popular/"                    to "Most Popular",
         "${mainUrl}/categories/manyvids/"             to "ManyVids",
@@ -77,6 +76,7 @@ class WatchPorn(context: Context) : MainAPI() {
         "${mainUrl}/categories/analvids/"             to "AnalVids",
         "${mainUrl}/categories/pornworld/"            to "PornWorld",
         "${mainUrl}/categories/brattysis/"            to "BrattySis",
+        "${mainUrl}/latest-updates/"                  to "latest-updates",
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
