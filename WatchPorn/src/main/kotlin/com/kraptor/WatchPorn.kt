@@ -29,6 +29,7 @@ class WatchPorn(context: Context) : MainAPI() {
     private val context = context
 
     override val mainPage = mainPageOf(
+        "${mainUrl}/latest-updates/"                    to "latest"
         "${mainUrl}/top-rated/"           to "Top Rated",
         "${mainUrl}/most-popular/"                    to "Most Popular",
         "${mainUrl}/categories/manyvids/"             to "ManyVids",
