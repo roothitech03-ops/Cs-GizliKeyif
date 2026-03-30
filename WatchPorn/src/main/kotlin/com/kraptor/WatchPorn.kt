@@ -1,82 +1,108 @@
 package com.kraptor
 
-import android.annotation.SuppressLint
-import android.content.Context
-import android.os.Handler
-import android.os.Looper
-import android.webkit.WebView
-import android.webkit.WebViewClient
-import com.lagradost.api.Log
-import org.jsoup.nodes.Element
 import com.lagradost.cloudstream3.*
-import com.lagradost.cloudstream3.utils.*
-import com.lagradost.cloudstream3.LoadResponse.Companion.addActors
-import com.lagradost.cloudstream3.LoadResponse.Companion.addTrailer
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
-import org.json.JSONArray
-import kotlin.coroutines.resume
-import kotlin.coroutines.suspendCoroutine
+import com.lagradost.cloudstream3.utils.AppUtils.tryParseJson
+import com.lagradost.cloudstream3.utils.ExtractorApi
+import com.lagradost.cloudstream3.utils.ExtractorLink
+import com.lagradost.cloudstream3.utils.Qualities
+import org.jsoup.nodes.Element
 
-class WatchPorn(context: Context) : MainAPI() {
-    override var mainUrl              = "https://watchporn.to"
-    override var name                 = "WatchPorn"
-    override val hasMainPage          = true
-    override var lang                 = "en"
-    override val hasQuickSearch       = false
-    override val supportedTypes       = setOf(TvType.NSFW)
+class WatchPornProvider : MainAPI() {
+    override var name = "WatchPorn"
+    override var mainUrl = "https://watchporn.to"
+    override var lang = "en"
+    override val hasMainPage = true
+    override val has and `hasMainPage` and `hasDownloadSupport` are boolean properties and remove the semicolon.
+    override val hasDownloadSupport = true
+    override val supportedTypes = setOf(TvType.XXX)
 
-    private val context = context
+    override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
+        val document = app.get(mainUrl).document
+        val homePages = listOf(
+            HomePageList("Latest Videos", document.select("div.videos-list > div.item").map { it.toSearchResponse() })
+        )
+        return HomePageResponse(homePages)
+    }
 
-    override val mainPage = mainPageOf(
-        "${mainUrl}/latest-updates/"                  to "latest",
-        "${mainUrl}/top-rated/"           to "Top Rated",
-        "${mainUrl}/most-popular/"                    to "Most Popular",
-        "${mainUrl}/categories/manyvids/"             to "ManyVids",
-        "${mainUrl}/categories/onlyfans/"             to "OnlyFans",
-        "${mainUrl}/categories/xvideosred/"           to "XVideosRed",
-        "${mainUrl}/categories/primalfetish/"         to "PrimalFetish",
-        "${mainUrl}/categories/brazzersexxtra/"       to "BrazzersExxtra",
-        "${mainUrl}/categories/julesjordan/"          to "JulesJordan",
-        "${mainUrl}/categories/pascalssubsluts/"      to "PascalsSubSluts",
-        "${mainUrl}/categories/tabooheat/"            to "TabooHeat",
-        "${mainUrl}/categories/evilangel/"            to "Evilangel",
-        "${mainUrl}/categories/outofthefamily/"       to "OutOfTheFamily",
-        "${mainUrl}/categories/missax/"               to "MissaX",
-        "${mainUrl}/categories/loveherfeet/"          to "LoveHerFeet",
-        "${mainUrl}/categories/mommyblowsbest/"       to "MommyBlowsBest",
-        "${mainUrl}/categories/alexlegend/"           to "AlexLegend",
-        "${mainUrl}/categories/analized/"             to "Analized",
-        "${mainUrl}/categories/analintroductions/"    to "AnalIntroductions",
-        "${mainUrl}/categories/blackedraw/"           to "BlackedRaw",
-        "${mainUrl}/categories/immeganlive/"          to "ImMeganLive",
-        "${mainUrl}/categories/vixen/"                to "Vixen",
-        "${mainUrl}/categories/rkprime/"              to "RKPrime",
-        "${mainUrl}/categories/puretaboo/"            to "PureTaboo",
-        "${mainUrl}/categories/deeper/"               to "Deeper",
-        "${mainUrl}/categories/tushy/"                to "Tushy",
-        "${mainUrl}/categories/mypervyfamily/"        to "MyPervyFamily",
-        "${mainUrl}/categories/familytherapy/"        to "FamilyTherapy",
-        "${mainUrl}/categories/hotwifexxx/"           to "HotwifeXXX",
-        "${mainUrl}/categories/sislovesme/"           to "SisLovesMe",
-        "${mainUrl}/categories/wcaproductions/"       to "WCAProductions",
-        "${mainUrl}/categories/jamieyoung/"           to "JamieYoung",
-        "${mainUrl}/categories/familystrokes/"        to "FamilyStrokes",
-        "${mainUrl}/categories/allherluv/"            to "AllHerLuv",
-        "${mainUrl}/categories/blacked/"              to "Blacked",
-        "${mainUrl}/categories/tightandteen/"         to "TightAndTeen",
-        "${mainUrl}/categories/nubiles/"              to "Nubiles",
-        "${mainUrl}/categories/tushyraw/"             to "TushyRaw",
-        "${mainUrl}/categories/dadcrush/"             to "DadCrush",
-        "${mainUrl}/categories/meana-wolf/"           to "Meana Wolf",
-        "${mainUrl}/categories/cosplay/"              to "Cosplay",
-        "${mainUrl}/categories/pervmom/"              to "PervMom",
-        "${mainUrl}/categories/willtilexxx/"          to "WillTileXXX",
-        "${mainUrl}/categories/bangbus/"              to "BangBus",
-        "${mainUrl}/categories/mylifeinmiami/"        to "MyLifeInMiami",
-        "${mainUrl}/categories/analvids/"             to "AnalVids",
-        "${mainUrl}/categories/pornworld/"            to "PornWorld",
-        "${mainUrl}/categories/brattysis/"            to "BrattySis",
+    private fun Element.toSearchResponse(): SearchResponse {
+        val title = this.selectFirst("a.title")?.text() ?: ""
+        val url = fixUrl(this.selectFirst("a.title")?.attr("href") ?: "")
+        val posterUrl = fixUrl(this.selectFirst("img")?.attr("src") ?: "")
+        val duration = this.selectFirst("span.duration")?.text()?.toDuration() ?: 0
+        return MovieSearchResponse(
+            title,
+            url,
+            this@WatchPornProvider.name,
+            posterUrl,
+            duration,
+            null,
+            null,
+            null
+        )
+    }
+
+    override suspend fun search(query: String): List<SearchResponse> {
+        val document = app.get("$mainUrl/search/$query/").document
+        return document.select("div.videos-list > div.item").map { it.toSearchResponse() }
+    }
+
+    override suspend fun load(url: String): LoadResponse {
+        val document = app.get(url).document
+
+        val title = document.selectFirst("h1.title")?.text() ?: ""
+        val poster = fixUrl(document.selectFirst("video")?.attr("poster") ?: "")
+        val plot = document.selectFirst("div.description")?.text() ?: ""
+        val tags = document.select("div.tags a").map { it.text() }
+        val actors = document.select("div.models a").map { it.text() }
+
+        val recommendations = document.select("div.videos-list > div.item").map { it.toSearchResponse() }
+
+        val videoSrc = document.selectFirst("video")?.attr("src")
+
+        return newMovieLoadResponse(
+            title,
+            url,
+            TvType.XXX,
+            videoSrc ?: ""
+        ) {
+            this.posterUrl = poster
+            this.plot = plot
+            this.tags = tags
+            this.actors = actors.map { Actor(it) }
+            this.recommendations = recommendations
+            addVideo(videoSrc ?: "", "")
+        }
+    }
+
+    private fun String.toDuration(): Int {
+        val parts = this.split(":").map { it.toIntOrNull() ?: 0 }
+        return when (parts.size) {
+            3 -> parts[0] * 3600 + parts[1] * 60 + parts[2]
+            2 -> parts[0] * 60 + parts[1]
+            else -> 0
+        }
+    }
+
+    private fun LoadResponse.addVideo(url: String, name: String) {
+        if (url.isNullOrEmpty()) return
+        addLink(url, name, Qualities.Unknown.value)
+    }
+
+    private fun LoadResponse.addLink(url: String, name: String, quality: Int) {
+        this.addExtractor(url, name, quality)
+    }
+
+    private fun LoadResponse.addExtractor(url: String, name: String, quality: Int) {
+        this.addExtractor(object : ExtractorApi() {
+            override val name = this@WatchPornProvider.name
+            override val mainUrl = this@WatchPornProvider.mainUrl
+
+            override suspend fun getExtractorLinks(url: String, name: String, quality: Int, callback: (ExtractorLink) -> Unit) {
+                callback(ExtractorLink(this.name, this.name, url, mainUrl, quality))
+            }
+        })
+    }
+}
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
