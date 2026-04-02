@@ -105,7 +105,7 @@ class WatchAnimeWorldProvider : MainAPI() {
                 val epPoster = fixUrlNull(epElement.selectFirst("img")?.attr("src") ?: epElement.selectFirst("img")?.attr("data-src"))
 
                 episodes.add(
-                    Episode(
+                    newEpisode(
                         data = epHref,
                         name = epTitle,
                         season = seasonNum,
