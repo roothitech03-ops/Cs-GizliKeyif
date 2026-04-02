@@ -22,7 +22,7 @@ cloudstream {
         "Cartoon"
     )
 
-    iconUrl= "https://watchanimeworld.net/wp-content/uploads/cropped-AW_Smiley-180x180.png"
+    iconUrl= "https://www.google.com/s2/favicons?domain=animesalt.ac&sz=%size%"
 
 
     isCrossPlatform = true
