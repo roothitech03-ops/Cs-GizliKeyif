@@ -47,14 +47,14 @@ class WatchAnimeWorldProvider : MainAPI() {
     ): HomePageResponse {
         val url = if (page <= 1) request.data else "${request.data}$page/"
         val document = app.get(url).document
-        val home = document.select("article.item, div.item").mapNotNull {
+        val home = document.select("article.post").mapNotNull {
             it.toSearchResult()
         }
         return newHomePageResponse(request.name, home)
     }
 
     private fun Element.toSearchResult(): SearchResponse? {
-        val title = this.selectFirst("h3")?.text() ?: this.selectFirst("h2")?.text() ?: this.selectFirst(".title")?.text() ?: return null
+        val title = this.selectFirst(".entry-title, h2, h3")?.text() ?: return null
         val href = fixUrl(this.selectFirst("a")?.attr("href") ?: return null)
         val posterUrl = fixUrlNull(this.selectFirst("img")?.attr("src") ?: this.selectFirst("img")?.attr("data-src"))
         
@@ -71,7 +71,7 @@ class WatchAnimeWorldProvider : MainAPI() {
 
     override suspend fun search(query: String): List<SearchResponse> {
         val document = app.get("$mainUrl/?s=$query").document
-        return document.select("article.item, div.item").mapNotNull {
+        return document.select("article.post").mapNotNull {
             it.toSearchResult()
         }
     }
@@ -97,12 +97,12 @@ class WatchAnimeWorldProvider : MainAPI() {
             }
         } else {
             val episodes = mutableListOf<Episode>()
-            document.select("ul.episodios li").forEach { epElement ->
+            document.select("#episode_by_temp li").forEach { epElement ->
                 val epHref = fixUrlNull(epElement.selectFirst("a")?.attr("href")) ?: return@forEach
-                val epTitle = epElement.selectFirst("div.episodiotitle a")?.text()
-                val meta = epElement.selectFirst("div.numerando")?.text() // Format: 1-1
-                val seasonNum = meta?.split("-")?.firstOrNull()?.trim()?.toIntOrNull()
-                val epNum = meta?.split("-")?.lastOrNull()?.trim()?.toIntOrNull()
+                val epTitle = epElement.selectFirst(".entry-title, h2")?.text()
+                val meta = epElement.selectFirst(".num-epi")?.text() // Format: 1x1
+                val seasonNum = meta?.split("x")?.firstOrNull()?.trim()?.toIntOrNull()
+                val epNum = meta?.split("x")?.lastOrNull()?.trim()?.toIntOrNull()
                 val epPoster = fixUrlNull(epElement.selectFirst("img")?.attr("src") ?: epElement.selectFirst("img")?.attr("data-src"))
 
                 episodes.add(
