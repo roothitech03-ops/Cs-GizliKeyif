@@ -10,6 +10,7 @@ import com.lagradost.cloudstream3.TvType
 import com.lagradost.cloudstream3.MainPageRequest
 import com.lagradost.cloudstream3.HomePageResponse
 import com.lagradost.cloudstream3.Episode
+import com.lagradost.cloudstream3.newEpisode
 import com.lagradost.cloudstream3.newAnimeSearchResponse
 import com.lagradost.cloudstream3.newMovieSearchResponse
 import com.lagradost.cloudstream3.newTvSeriesLoadResponse
@@ -105,13 +106,12 @@ class WatchAnimeWorldProvider : MainAPI() {
                 val epPoster = fixUrlNull(epElement.selectFirst("img")?.attr("src") ?: epElement.selectFirst("img")?.attr("data-src"))
 
                 episodes.add(
-                    newEpisode(
-                        data = epHref,
-                        name = epTitle,
-                        season = seasonNum,
-                        episode = epNum,
-                        posterUrl = epPoster
-                    )
+                    newEpisode(epHref) {
+                        this.name = epTitle
+                        this.season = seasonNum
+                        this.episode = epNum
+                        this.posterUrl = epPoster
+                    }
                 )
             }
 
