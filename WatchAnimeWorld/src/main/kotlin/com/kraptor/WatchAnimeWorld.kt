@@ -16,7 +16,6 @@ class WatchAnimeWorldProvider : MainAPI() {
     override var name = "WatchAnimeWorld"
     override var lang = "hi"
     override val hasMainPage = true
-    override val hasSearch = true
     override val supportedTypes = setOf(
         TvType.Anime,
         TvType.AnimeMovie,
