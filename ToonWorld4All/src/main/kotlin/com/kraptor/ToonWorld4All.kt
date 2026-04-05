@@ -326,7 +326,7 @@ class ToonWorld4AllProvider : MainAPI() {
 
                 // Landed on adrinolinks timer page
                 finalUrl.contains("adrinolinks") || finalUrl.contains("adrino.") ->
-                    bypassAdrinolinks(finalUrl, resp)
+                    bypassAdrinolinks(finalUrl)
 
                 // Anything else (rocklinks → GDTot, etc.) — skip
                 else -> null
@@ -336,19 +336,26 @@ class ToonWorld4AllProvider : MainAPI() {
 
     // ─── Adrinolinks (AdLinkFly) bypass ───────────────────────────────────
     //
-    // After following the redirect we land on the /links/go?token=... form page.
-    // Extract all named inputs (includes CSRF + token) and POST back.
-    // 2025: response may be JSON {"url":"..."} OR a further redirect to the video host.
-    private suspend fun bypassAdrinolinks(adrinoUrl: String, pageResp: NiceResponse): String? {
+    // Fetches the adrinolinks page (which has already been redirected to
+    // /links/go?token=...), extracts form inputs, waits, then POSTs.
+    // 2025: response may be JSON {"url":"..."} OR redirect to the video host.
+    private suspend fun bypassAdrinolinks(adrinoUrl: String): String? {
         return try {
+            // Fetch adrinolinks – CloudStream follows 302 to /links/go?token=...
+            val pageResp = app.get(
+                adrinoUrl,
+                headers = mapOf("User-Agent" to ua, "Referer" to mainUrl)
+            )
+            val respUrl     = pageResp.url
             val finalDomain = Regex("""^(https?://[^/]+)""")
-                .find(pageResp.url)?.groupValues?.get(1) ?: return null
+                .find(respUrl)?.groupValues?.get(1) ?: return null
 
             val doc = pageResp.document
 
-            val formData = doc.select("input[name]")
+            // Use .key / .value instead of destructuring to avoid type-inference errors
+            val formData: MutableMap<String, String> = doc.select("input[name]")
                 .associate { it.attr("name") to it.attr("value") }
-                .filter { (k, _) -> k.isNotBlank() }
+                .filter { it.key.isNotBlank() }
                 .toMutableMap()
 
             if (formData.isEmpty()) return null
@@ -362,7 +369,7 @@ class ToonWorld4AllProvider : MainAPI() {
                 headers = mapOf(
                     "User-Agent"       to ua,
                     "X-Requested-With" to "XMLHttpRequest",
-                    "Referer"          to pageResp.url,
+                    "Referer"          to respUrl,
                     "Accept"           to "application/json, text/javascript, */*; q=0.01",
                     "Content-Type"     to "application/x-www-form-urlencoded; charset=UTF-8",
                 )
