@@ -30,7 +30,7 @@ class ToonWorld4AllProvider : MainAPI() {
     override var name                 = "ToonWorld4All"
     override var lang                 = "hi"
     override val hasMainPage          = true
-    override val hasSearch            = true
+    override val hasSearch            = false 
     override val supportedTypes       = setOf(
         TvType.Anime,
         TvType.AnimeMovie,
