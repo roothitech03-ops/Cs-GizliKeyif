@@ -3,18 +3,25 @@ package com.kraptor
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.utils.ExtractorLink
+import kotlinx.coroutines.delay
 import org.jsoup.nodes.Element
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ToonWorld4All CloudStream Provider
-// Site  : https://toonworld4all.me
-// Theme : WordPress (Gutenberg) + Cloudflare
-// Lang  : Hindi / Tamil / Telugu / English / Japanese (Multi Audio)
+// Site     : https://toonworld4all.me  (episode pages: archive.toonworld4all.me)
 //
-// Watch Online section → <iframe src="dood.wf/e/..."> or similar
-// Download section     → redirect/main.php → rocklinks → GDTot  (download only, not streaming)
+// Watch Online structure (confirmed):
+//   <p><strong>Watch Online</strong> –
+//       <a href="https://archive.toonworld4all.me/redirect/HASH">DoodStream</a> |
+//       <a href="https://archive.toonworld4all.me/redirect/HASH">StreamTape</a>
+//   </p>
 //
-// Key insight: iframes are the streamable links; redirect buttons are downloads.
+// The redirect/HASH URLs are site-local redirectors → HTTP 302 → final video host.
+// Just following the redirect gives us the actual streamable URL.
+//
+// Some episode pages also embed iframes directly (dood.watch, streamtape, etc.).
+// The series page links episodes via:
+//   <a href="https://archive.toonworld4all.me/episode/show-3x1">Watch/Download</a>
 // ─────────────────────────────────────────────────────────────────────────────
 
 class ToonWorld4AllProvider : MainAPI() {
@@ -32,39 +39,57 @@ class ToonWorld4AllProvider : MainAPI() {
     private val ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
                      "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
-    private fun baseHeaders() = mapOf(
+    private fun baseHeaders(referer: String = mainUrl) = mapOf(
         "User-Agent" to ua,
-        "Referer"    to mainUrl,
+        "Referer"    to referer,
         "Accept"     to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     )
 
     private suspend fun fetchDoc(url: String) =
         app.get(url, headers = baseHeaders()).document
 
-    // Separator for bundling multiple video source URLs per episode
+    // Separator used to bundle multiple source URLs per episode
     private val SEP = "|||"
 
-    // Known video hosts that loadExtractor can handle
+    // ─── Video host detection ─────────────────────────────────────────────
     private val videoHosts = listOf(
-        "dood", "ds2play", "dooood", "d000d",
-        "streamtape", "filemoon", "mixdrop",
+        "dood", "ds2play", "dooood", "d000d", "doodstream",
+        "streamtape",
+        "filemoon", "fmoonembed",
+        "mixdrop",
         "stream.sb", "sbplay", "embedrise",
-        "ok.ru", "mp4upload", "rumble",
-        "drive.google", "fembed", "streamlare",
-        "upstream", "kwik", "vidcloud",
-        "rapidvideo", "streamhub"
+        "ok.ru",
+        "mp4upload",
+        "rumble",
+        "drive.google",
+        "fembed",
+        "upstream",
+        "kwik",
+        "vidcloud", "vidstream",
+        "rapidvideo",
+        "streamhub",
+        "voe.sx",
+        "vidhide",
+        "streamwish",
     )
 
     private fun isVideoHost(url: String) =
-        url.startsWith("http") && videoHosts.any { url.contains(it) }
+        url.startsWith("http") && videoHosts.any { url.contains(it, ignoreCase = true) }
+
+    // ─── Is a site-local redirect link we should follow? ─────────────────
+    // Matches patterns like:
+    //   https://archive.toonworld4all.me/redirect/ca87c8f9…
+    //   https://toonworld4all.me/redirect/main.php?url=…
+    private fun isRedirectLink(url: String): Boolean {
+        if (url.isBlank() || url == "#") return false
+        return url.contains("/redirect/") || url.contains("redirect/main.php")
+    }
 
     // ─── Thumbnail helpers ─────────────────────────────────────────────────
     private fun Element.bestSrc(): String? {
         val raw = attr("data-lazy-src").ifBlank {
             attr("data-src").ifBlank {
-                attr("data-original").ifBlank {
-                    attr("src")
-                }
+                attr("data-original").ifBlank { attr("src") }
             }
         }
         return fixUrl(raw).ifBlank { null }
@@ -94,8 +119,7 @@ class ToonWorld4AllProvider : MainAPI() {
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val base = request.data.trimEnd('/')
-        val url  = "$base/page/$page/"
-        val doc  = fetchDoc(url)
+        val doc  = fetchDoc("$base/page/$page/")
         val items = doc.select("article.post, article.type-post").mapNotNull { parseCard(it) }
         val hasNext = doc.selectFirst(
             "a.next, a[rel=next], .pagination .next, a[href*='/page/${page + 1}/']"
@@ -148,7 +172,9 @@ class ToonWorld4AllProvider : MainAPI() {
 
         val content = doc.selectFirst(".entry-content, .post-content")
 
-        // ── Case A: page links to individual episode URLs (/episode/show-1x01) ─
+        // ── Case A: page links to individual episode pages ─────────────────
+        // Matches both /episode/ and /episode/ on archive subdomain.
+        // URL patterns like: archive.toonworld4all.me/episode/fire-force-3x1
         val episodePageLinks = content
             ?.select("a[href*='/episode/']")
             ?.map { it.attr("href").trim() }
@@ -177,7 +203,7 @@ class ToonWorld4AllProvider : MainAPI() {
             }
         }
 
-        // ── Case B: all iframes + buttons inline, grouped by episode headings ─
+        // ── Case B: all links inline, grouped by episode headings ──────────
         if (content == null) {
             return newMovieLoadResponse(title, url, TvType.AnimeMovie, url) {
                 posterUrl = poster; this.plot = plot
@@ -187,14 +213,9 @@ class ToonWorld4AllProvider : MainAPI() {
         val episodeBlocks = parseEpisodeBlocks(content)
 
         if (episodeBlocks.isEmpty()) {
-            // No episode structure — treat as movie/single entry
-            // Collect all Watch Online iframes from the whole page
-            val allIframes = content.select("iframe[src]")
-                .map { it.attr("src").trim() }
-                .filter { it.isNotBlank() }
-                .distinct()
-
-            val movieData = allIframes.joinToString(SEP).ifBlank { url }
+            // No episode structure found — treat entire page as a movie
+            val allLinks = collectStreamableLinks(content)
+            val movieData = allLinks.joinToString(SEP).ifBlank { url }
             return newMovieLoadResponse(title, url, TvType.AnimeMovie, movieData) {
                 posterUrl = poster; this.plot = plot
             }
@@ -216,9 +237,30 @@ class ToonWorld4AllProvider : MainAPI() {
         }
     }
 
-    // ─── Parse inline episode blocks ───────────────────────────────────────
-    // Scans Gutenberg content children for episode headings and the iframes /
-    // links that follow each heading.
+    // ─── Collect streamable links from a content block ────────────────────
+    // Gathers: iframes, direct video-host anchors, AND site-local redirect links.
+    // Redirect links (archive.toonworld4all.me/redirect/HASH) are included as-is;
+    // they are resolved to final video-host URLs later in loadLinks.
+    private fun collectStreamableLinks(el: Element): List<String> {
+        val results = mutableListOf<String>()
+
+        // Direct iframes
+        el.select("iframe[src], iframe[data-src]").forEach { iframe ->
+            val src = iframe.attr("src").ifBlank { iframe.attr("data-src") }.trim()
+            if (src.isNotBlank()) results.add(src)
+        }
+
+        // Anchors: either direct video hosts OR site redirect links
+        el.select("a[href]").forEach { a ->
+            val href = a.attr("href").trim()
+            if (href.isBlank() || href == "#" || href.startsWith("mailto:")) return@forEach
+            if (isVideoHost(href) || isRedirectLink(href)) results.add(href)
+        }
+
+        return results.distinct()
+    }
+
+    // ─── Parse inline episode blocks ──────────────────────────────────────
     private fun parseEpisodeBlocks(
         content: Element
     ): List<Triple<Int, String, List<String>>> {
@@ -235,9 +277,10 @@ class ToonWorld4AllProvider : MainAPI() {
             val tagName = child.tagName().lowercase()
             val match   = epRe.find(text)
 
-            // Episode heading detected
+            // Episode heading
             if (match != null &&
-                tagName in setOf("h1", "h2", "h3", "h4", "h5", "p", "div", "strong", "b")
+                tagName in setOf("h1", "h2", "h3", "h4", "h5", "p", "div", "strong", "b") &&
+                text.length < 120
             ) {
                 if (currentLinks.isNotEmpty())
                     blocks.add(Triple(currentNum, currentLabel, currentLinks))
@@ -249,22 +292,10 @@ class ToonWorld4AllProvider : MainAPI() {
                 continue
             }
 
-            // Collect Watch Online iframes (primary streaming source)
-            val iframes = child.select("iframe[src]")
-                .map { it.attr("src").trim() }
-                .filter { it.isNotBlank() }
-
-            // Collect direct video host links in buttons
-            val directVideoLinks = child
-                .select("a.wp-block-button__link, .wp-block-button a, a[href]")
-                .map { it.attr("href").trim() }
-                .filter { isVideoHost(it) }
-
-            val allFound = (iframes + directVideoLinks).distinct()
-
-            if (allFound.isNotEmpty()) {
+            val found = collectStreamableLinks(child)
+            if (found.isNotEmpty()) {
                 if (currentNum == 0) { currentNum = 1; currentLabel = "Episode 1" }
-                currentLinks.addAll(allFound)
+                currentLinks.addAll(found)
             }
         }
 
@@ -274,16 +305,91 @@ class ToonWorld4AllProvider : MainAPI() {
         return blocks.map { Triple(it.first, it.second, it.third.distinct()) }
     }
 
-    // ─── loadLinks ──────────────────────────────────────────────────────────
-    // data can be:
-    //   1. SEP-joined iframe/video URLs   → from Case B inline blocks
-    //   2. An episode page URL            → from Case A (fetch and find iframes)
-    //   3. A direct series URL            → single movie fallback
+    // ─── Resolve a single redirect/link to a streamable video URL ─────────
     //
-    // Strategy:
-    //   a) Direct video host URL → loadExtractor
-    //   b) Episode page URL      → fetch → find iframes → loadExtractor each
-    //   c) Series page URL       → fetch → find iframes in whole page
+    // Handles:
+    //   1. archive.toonworld4all.me/redirect/HASH → HTTP 302 → video host
+    //   2. toonworld4all.me/redirect/main.php?url=BASE64 → HTTP 302 → adrinolinks → POST → video
+    //   3. Already a video host → return as-is
+    //   4. Unknown redirect → follow and check final URL
+    private suspend fun resolveToVideoUrl(linkUrl: String): String? {
+        if (isVideoHost(linkUrl)) return linkUrl
+
+        return try {
+            // Follow all redirects and capture the final URL
+            val resp      = app.get(linkUrl, headers = baseHeaders(linkUrl))
+            val finalUrl  = resp.url
+
+            when {
+                // Already landed on a video host
+                isVideoHost(finalUrl) -> finalUrl
+
+                // Landed on adrinolinks timer page
+                finalUrl.contains("adrinolinks") || finalUrl.contains("adrino.") ->
+                    bypassAdrinolinks(finalUrl, resp)
+
+                // Anything else (rocklinks → GDTot, etc.) — skip
+                else -> null
+            }
+        } catch (_: Exception) { null }
+    }
+
+    // ─── Adrinolinks (AdLinkFly) bypass ───────────────────────────────────
+    //
+    // After following the redirect we land on the /links/go?token=... form page.
+    // Extract all named inputs (includes CSRF + token) and POST back.
+    // 2025: response may be JSON {"url":"..."} OR a further redirect to the video host.
+    private suspend fun bypassAdrinolinks(adrinoUrl: String, pageResp: NiceResponse): String? {
+        return try {
+            val finalDomain = Regex("""^(https?://[^/]+)""")
+                .find(pageResp.url)?.groupValues?.get(1) ?: return null
+
+            val doc = pageResp.document
+
+            val formData = doc.select("input[name]")
+                .associate { it.attr("name") to it.attr("value") }
+                .filter { (k, _) -> k.isNotBlank() }
+                .toMutableMap()
+
+            if (formData.isEmpty()) return null
+
+            // Wait out the countdown timer
+            delay(4_000)
+
+            val postResp = app.post(
+                "$finalDomain/links/go",
+                data    = formData,
+                headers = mapOf(
+                    "User-Agent"       to ua,
+                    "X-Requested-With" to "XMLHttpRequest",
+                    "Referer"          to pageResp.url,
+                    "Accept"           to "application/json, text/javascript, */*; q=0.01",
+                    "Content-Type"     to "application/x-www-form-urlencoded; charset=UTF-8",
+                )
+            )
+
+            // Try JSON body first
+            val jsonUrl = Regex(""""url"\s*:\s*"([^"]+)"""")
+                .find(postResp.text)?.groupValues?.get(1)
+                ?.replace("\\/", "/")
+                ?.takeIf { it.startsWith("http") }
+
+            if (!jsonUrl.isNullOrBlank()) return jsonUrl
+
+            // Fallback: final URL after redirect chain
+            val landed = postResp.url
+            if (landed.isNotBlank() && landed != "$finalDomain/links/go" && isVideoHost(landed))
+                return landed
+
+            // Fallback 2: scan response text for known video host URLs
+            Regex("""https?://[^\s"'<>]+""").findAll(postResp.text)
+                .map { it.value }
+                .firstOrNull { isVideoHost(it) }
+
+        } catch (_: Exception) { null }
+    }
+
+    // ─── loadLinks ──────────────────────────────────────────────────────────
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -291,54 +397,53 @@ class ToonWorld4AllProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
 
-        // ── Case 1: SEP-joined direct video URLs (stored from Case B) ─────
+        // ── 1. SEP-joined URLs from parseEpisodeBlocks (Case B) ───────────
         if (data.contains(SEP)) {
-            data.split(SEP).filter { it.isNotBlank() }.forEach { videoUrl ->
-                if (isVideoHost(videoUrl)) {
-                    try { loadExtractor(videoUrl, mainUrl, subtitleCallback, callback) }
-                    catch (_: Exception) {}
-                }
+            data.split(SEP).filter { it.isNotBlank() }.forEach { rawUrl ->
+                processOneLink(rawUrl, subtitleCallback, callback)
             }
             return true
         }
 
-        // ── Case 2: Single direct video URL ──────────────────────────────
+        // ── 2. Single direct video host URL (rare fast path) ─────────────
         if (isVideoHost(data)) {
             try { loadExtractor(data, mainUrl, subtitleCallback, callback) }
             catch (_: Exception) {}
             return true
         }
 
-        // ── Case 3: Episode page URL or series page URL ───────────────────
-        // Fetch the page and extract all iframe sources
+        // ── 3. Episode page URL (Case A) or series page URL (movie fallback)
+        //      → Fetch the page and extract ALL streamable/redirect links.
         if (data.startsWith("http")) {
             try {
                 val doc = fetchDoc(data)
+                val content = doc.selectFirst(".entry-content, .post-content, #content, body")
+                    ?: return true
 
-                // Grab every iframe on the page
-                val iframesFound = doc.select("iframe[src], iframe[data-src]")
-                    .map { el ->
-                        el.attr("src").ifBlank { el.attr("data-src") }.trim()
-                    }
-                    .filter { it.isNotBlank() }
-                    .distinct()
-
-                // Also grab any direct video host anchor links
-                val directLinks = doc.select("a[href]")
-                    .map { it.attr("href").trim() }
-                    .filter { isVideoHost(it) }
-                    .distinct()
-
-                val allVideoSrcs = (iframesFound + directLinks).distinct()
-
-                allVideoSrcs.forEach { src ->
-                    try { loadExtractor(src, mainUrl, subtitleCallback, callback) }
-                    catch (_: Exception) {}
+                val links = collectStreamableLinks(content)
+                links.forEach { rawUrl ->
+                    processOneLink(rawUrl, subtitleCallback, callback)
                 }
-
             } catch (_: Exception) {}
         }
 
         return true
+    }
+
+    // ─── Process a single raw URL: resolve redirects then call loadExtractor
+    private suspend fun processOneLink(
+        rawUrl: String,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit,
+    ) {
+        try {
+            val videoUrl = if (isVideoHost(rawUrl)) {
+                rawUrl
+            } else {
+                resolveToVideoUrl(rawUrl)
+            } ?: return
+
+            loadExtractor(videoUrl, mainUrl, subtitleCallback, callback)
+        } catch (_: Exception) {}
     }
 }
