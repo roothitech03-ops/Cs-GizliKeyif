@@ -5,15 +5,13 @@ import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.Qualities
+import com.lagradost.cloudstream3.utils.WebViewResolver
 import org.jsoup.nodes.Element
 import java.net.URLDecoder
 import android.util.Base64
 import org.json.JSONArray
 import org.json.JSONObject
-import java.security.MessageDigest
-import javax.crypto.Cipher
-import javax.crypto.spec.IvParameterSpec
-import javax.crypto.spec.SecretKeySpec
+import okhttp3.Request as OkRequest
 
 class WatchAnimeWorldProvider : MainAPI() {
 
@@ -54,215 +52,86 @@ class WatchAnimeWorldProvider : MainAPI() {
             "Referer"    to referer
         )).document
 
-    // ─── AbyssCDN Decryption ─────────────────────────────────────────────────
+    // ─── AbyssCDN Link Extraction ─────────────────────────────────────────────
     //
-    // AbyssCDN player-v2 (iamcdn.net/player-v2/core.bundle.js) algorithm:
+    // AbyssCDN (abysscdn.com) uses Firebase-authenticated GCS signed URLs to
+    // deliver video.  The raw CDN files on sssrr.org are permanently encrypted
+    // (first bytes 69 71 24 69 — NOT a valid MP4 container).  Emitting those
+    // URLs directly would cause ExoPlayer error 3003 (PARSING_CONTAINER_UNSUPPORTED).
     //
-    //   keyStr      = "${user_id}:${slug}:${md5_id}"
-    //   md5Hex      = MD5(keyStr).toHexString()   → 32-char lowercase hex
-    //   encodedKey  = md5Hex.toByteArray(UTF-8)   → 32 bytes  (AES-256 key)
-    //   counter     = encodedKey[0..15]            → first 16 bytes = AES-CTR IV
-    //   plaintext   = AES-256-CTR decrypt(key=encodedKey, iv=counter, data=mediaBytes)
-    //   result      = JSON.parse(plaintext)        → {mp4:{sources:[{url,path,label}]}}
-    //
-    // Final source URL  =  source.url + "/" + source.path
-    //
-    // SPECIAL PARSING: The outer `datas` JSON is constructed server-side by
-    // embedding raw binary bytes for the "media" field.  Some bytes in range
-    // 0x00-0x1F are stored as \uXXXX escapes, but with a server bug where
-    // nibble 0 is stored as binary 0x00 instead of ASCII '0' (0x30).
-    // Standard JSON.parse() therefore REJECTS the blob.  We use a custom
-    // scanner (decodeAbyssMediaBytes) that is lenient about that exact bug.
+    // We use WebViewResolver to execute the AbyssCDN player JavaScript in a WebView
+    // and intercept the GCS streaming URL it builds before the first video request.
 
-    /** MD5 of [input] → 32-char lowercase hex string. */
-    private fun md5Hex(input: String): String {
-        val digest = MessageDigest.getInstance("MD5")
-        return digest.digest(input.toByteArray(Charsets.UTF_8))
-            .joinToString("") { "%02x".format(it.toInt() and 0xFF) }
-    }
-
-    /**
-     * Scan the raw bytes of the outer-JSON blob starting at [startPos] and
-     * decode one JSON string value (the media ciphertext), stopping at the
-     * first unescaped `"` (0x22).
-     *
-     * Rules (superset of JSON, lenient about the server-side null-byte bug):
-     *   \\n → 0x0A,  \\r → 0x0D,  \\t → 0x09,  \\b → 0x08,  \\f → 0x0C
-     *   \\\\ → 0x5C,  \\" → 0x22,  \\/ → 0x2F
-     *   \\uXXXX → (codepoint & 0xFF) ; a hex nibble of 0x00 is treated as '0'
-     *   any other byte → taken verbatim
-     */
-    private fun decodeAbyssMediaBytes(raw: ByteArray, startPos: Int): ByteArray {
-        val out = ArrayList<Byte>(2400)
-        var i   = startPos
-        while (i < raw.size) {
-            val b = raw[i].toInt() and 0xFF
-            when {
-                b == 0x22 -> break                         // closing "
-                b == 0x5C -> {                             // backslash
-                    val esc = if (i + 1 < raw.size) (raw[i + 1].toInt() and 0xFF) else 0
-                    when (esc) {
-                        0x22 -> { out.add(0x22.toByte()); i += 2 }
-                        0x5C -> { out.add(0x5C.toByte()); i += 2 }
-                        0x2F -> { out.add(0x2F.toByte()); i += 2 }
-                        0x6E -> { out.add(0x0A.toByte()); i += 2 }
-                        0x72 -> { out.add(0x0D.toByte()); i += 2 }
-                        0x74 -> { out.add(0x09.toByte()); i += 2 }
-                        0x62 -> { out.add(0x08.toByte()); i += 2 }
-                        0x66 -> { out.add(0x0C.toByte()); i += 2 }
-                        0x75 -> {                           // \uXXXX
-                            if (i + 5 < raw.size) {
-                                val n1 = hexNibble(raw[i + 2])
-                                val n2 = hexNibble(raw[i + 3])
-                                val n3 = hexNibble(raw[i + 4])
-                                val n4 = hexNibble(raw[i + 5])
-                                val cp = (n1 shl 12) or (n2 shl 8) or (n3 shl 4) or n4
-                                out.add((cp and 0xFF).toByte())
-                            }
-                            i += 6
-                        }
-                        else -> i += 2                     // unknown escape – skip
-                    }
-                }
-                else -> { out.add(b.toByte()); i++ }
-            }
-        }
-        return out.toByteArray()
-    }
-
-    /** Convert one raw byte to its hex nibble value (0-15).
-     *  Treats 0x00 as digit '0' to compensate for the server-side encoding bug. */
-    private fun hexNibble(raw: Byte): Int {
-        val b = raw.toInt() and 0xFF
-        return when {
-            b == 0x00            -> 0        // server bug: binary 0 instead of ASCII '0'
-            b in 0x30..0x39      -> b - 0x30 // '0'-'9'
-            b in 0x41..0x46      -> b - 0x41 + 10 // 'A'-'F'
-            b in 0x61..0x66      -> b - 0x61 + 10 // 'a'-'f'
-            else                 -> 0
-        }
-    }
-
-    /**
-     * AES-256-CTR decrypt the [mediaBytes] ciphertext.
-     * Key and IV are both derived from the MD5 hex string of the key material.
-     */
-    private fun abyssDecrypt(mediaBytes: ByteArray, slug: String, md5Id: String, userId: String): String {
-        val keyStr     = "$userId:$slug:$md5Id"
-        val md5HexStr  = md5Hex(keyStr)                         // 32-char hex
-        val encodedKey = md5HexStr.toByteArray(Charsets.UTF_8)  // 32 bytes → AES-256
-        val counter    = encodedKey.copyOfRange(0, 16)          // first 16 = CTR IV
-
-        val cipher = Cipher.getInstance("AES/CTR/NoPadding")
-        cipher.init(
-            Cipher.DECRYPT_MODE,
-            SecretKeySpec(encodedKey, "AES"),
-            IvParameterSpec(counter)
-        )
-        return String(cipher.doFinal(mediaBytes), Charsets.UTF_8)
-    }
-
-    /**
-     * Find the byte-offset of [needle] (ASCII) inside [haystack], starting at [from].
-     * Returns -1 if not found.
-     */
-    private fun indexOfBytes(haystack: ByteArray, needle: ByteArray, from: Int = 0): Int {
-        outer@ for (i in from..(haystack.size - needle.size)) {
-            for (j in needle.indices) {
-                if (haystack[i + j] != needle[j]) continue@outer
-            }
-            return i
-        }
-        return -1
-    }
-
-    /**
-     * Extract AbyssCDN video links from the page at `https://abysscdn.com/?v=[videoId]`.
-     *
-     * The page exposes:
-     *   const datas = "BASE64_OF_BINARY_JSON";
-     * where the binary JSON encodes:
-     *   { slug, md5_id, user_id, media: <AES-256-CTR ciphertext> }
-     * After decrypting `media` we get:
-     *   { mp4: { sources: [ {url, path, label} ] } }
-     * and each playable URL is  source.url + "/" + source.path.
-     */
     private suspend fun extractAbyssLinks(
         videoId: String,
         referer: String,
+        subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        val pageHtml = try {
-            app.get(
-                "https://abysscdn.com/?v=$videoId",
-                headers = mapOf(
-                    "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                    "Referer"    to referer
+        // ── AbyssCDN Architecture ────────────────────────────────────────────────
+        // AbyssCDN serves encrypted video files from sssrr.org CDN.
+        // The player decrypts them server-side via a Firebase-authenticated GCS proxy.
+        // (storage.googleapis.com/mediastorage/{ts}/{random}/{size}?mp4=...)
+        //
+        // Direct sssrr.org URLs start with bytes [69 71 24 69] = permanently encrypted,
+        // NOT valid MP4 → ExoPlayer throws ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED (3003).
+        //
+        // Solution: Use WebViewResolver to execute the AbyssCDN player JavaScript in a
+        // real WebView. The player initialises, calls play(), and makes a request to the
+        // GCS proxy URL. We intercept that URL BEFORE ExoPlayer sees it, and pass the
+        // real signed GCS URL to the callback — which ExoPlayer CAN play.
+        // If the WebView intercept fails (e.g. autoplay blocked), fall back to loadExtractor.
+
+        val abyssUrl = "https://abysscdn.com/?v=$videoId"
+        var intercepted = false
+
+        try {
+            val (videoReq, extraReqs) = WebViewResolver(
+                // Primary: GCS proxy URL generated by AbyssCDN player
+                Regex("""storage\.googleapis\.com/mediastorage/"""),
+                // Secondary: any HLS manifest or direct CDN mp4 the player might emit
+                additionalUrls = listOf(
+                    Regex("""\.m3u8"""),
+                    Regex("""abysscdn\.com/.*\.mp4""")
                 )
-            ).text
-        } catch (_: Exception) { return }
-
-        // 1. Extract the base64 string from:  const datas = "...";
-        val datasB64 = Regex("""const\s+datas\s*=\s*"([A-Za-z0-9+/=]+)"""")
-            .find(pageHtml)?.groupValues?.get(1) ?: return
-
-        // 2. Base64 decode → raw binary blob
-        val rawBytes = try {
-            Base64.decode(datasB64, Base64.DEFAULT)
-        } catch (_: Exception) { return }
-
-        // 3. Extract slug / md5_id / user_id via simple ASCII regex on the raw bytes
-        //    (safe because these fields are pure ASCII numbers/strings)
-        val rawAscii = String(rawBytes, Charsets.ISO_8859_1)
-        val slug   = Regex(""""slug"\s*:\s*"([^"]+)"""").find(rawAscii)?.groupValues?.get(1) ?: return
-        val md5Id  = Regex(""""md5_id"\s*:\s*(\d+)""").find(rawAscii)?.groupValues?.get(1) ?: return
-        val userId = Regex(""""user_id"\s*:\s*(\d+)""").find(rawAscii)?.groupValues?.get(1) ?: return
-
-        // 4. Locate the start of the "media" value bytes inside the raw blob
-        val mediaPfx    = """"media":"""".toByteArray(Charsets.US_ASCII)
-        val mediaPfxPos = indexOfBytes(rawBytes, mediaPfx)
-        if (mediaPfxPos < 0) return
-        val mediaStart  = mediaPfxPos + mediaPfx.size
-
-        // 5. Custom-decode the binary JSON string value (handles server-side \u-bug)
-        val mediaBytes = decodeAbyssMediaBytes(rawBytes, mediaStart)
-        if (mediaBytes.isEmpty()) return
-
-        // 6. AES-256-CTR decrypt → inner JSON
-        val decryptedJson = try {
-            abyssDecrypt(mediaBytes, slug, md5Id, userId)
-        } catch (_: Exception) { return }
-
-        // 7. Parse inner JSON and emit ExtractorLinks
-        val inner = try { JSONObject(decryptedJson) } catch (_: Exception) { return }
-        val sources = inner.optJSONObject("mp4")?.optJSONArray("sources") ?: return
-
-        for (i in 0 until sources.length()) {
-            val src   = sources.optJSONObject(i) ?: continue
-            val url   = src.optString("url").trim()
-            val path  = src.optString("path").trim()
-            val label = src.optString("label", "?").trim()
-            if (url.isBlank() || path.isBlank()) continue
-
-            val quality = when (label) {
-                "360p"  -> Qualities.P360.value
-                "480p"  -> Qualities.P480.value
-                "720p"  -> Qualities.P720.value
-                "1080p" -> Qualities.P1080.value
-                else    -> Qualities.Unknown.value
-            }
-
-            callback.invoke(
-                newExtractorLink(
-                    source = name,
-                    name   = "$name - Abyss $label",
-                    url    = "$url/$path",
-                    type   = ExtractorLinkType.VIDEO
-                ) {
-                    this.referer = "https://abysscdn.com/"
-                    this.quality = quality
-                }
+            ).resolveUsingWebView(
+                OkRequest.Builder()
+                    .url(abyssUrl)
+                    .addHeader("Referer", referer)
+                    .addHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+                    .build()
             )
+
+            // Check primary intercept first, then secondary list
+            val allCandidates = listOfNotNull(videoReq) + extraReqs
+            for (req in allCandidates) {
+                val url = req.url.toString()
+                // Never emit encrypted sssrr.org files — they are not playable
+                if (url.contains("sssrr.org")) continue
+                val isHls = url.contains(".m3u8")
+                callback.invoke(
+                    newExtractorLink(
+                        source = name,
+                        name   = "$name - AbyssCDN",
+                        url    = url,
+                        type   = if (isHls) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                    ) {
+                        this.referer = "https://abysscdn.com/"
+                        this.quality = Qualities.Unknown.value
+                    }
+                )
+                intercepted = true
+            }
+        } catch (_: Exception) { /* WebView not available on this device/build */ }
+
+        if (!intercepted) {
+            // Fallback: pass the AbyssCDN URL to the installed extractor registry.
+            // This works if the user has an AbyssCDN-compatible extractor installed
+            // from a third-party repository. If not, it silently produces no links
+            // (which is better UX than a 3003 container error).
+            try {
+                loadExtractor(abyssUrl, referer, subtitleCallback, callback)
+            } catch (_: Exception) {}
         }
     }
 
@@ -462,7 +331,7 @@ class WatchAnimeWorldProvider : MainAPI() {
     // ─── Video Links ──────────────────────────────────────────────────────────
     // Server 1 (MultiCloud)  – zephyrflick : hash → master.m3u8 (HLS)
     // Server 2 (Abyss)       – player1.php → short.icu slug → abysscdn.com
-    //                           custom AES-256-CTR decryption → sssrr.org MP4
+    //                           WebViewResolver intercepts GCS streaming URL
     // Server 3 (MultiCloud2) – pixdrive.cfd (HLS or MP4 from page)
 
     override suspend fun loadLinks(
@@ -506,10 +375,10 @@ class WatchAnimeWorldProvider : MainAPI() {
                 }
             }
 
-        // ── Server 2: player1.php → AbyssCDN (custom AES-256-CTR decryption) ─
+        // ── Server 2: player1.php → AbyssCDN (WebViewResolver → GCS signed URL) ─
         // player1.php?data=BASE64 where base64 = [{"link":"https://short.icu/VIDEO_ID"}]
         // The short.icu slug = abysscdn.com video ID.
-        // We decrypt the abysscdn.com page ourselves instead of using loadExtractor.
+        // extractAbyssLinks uses WebViewResolver to intercept the real GCS streaming URL.
         doc.select("iframe[src*='player1.php'], iframe[data-src*='player1.php']")
             .distinctBy {
                 (it.attr("src").ifBlank { it.attr("data-src") })
@@ -531,7 +400,7 @@ class WatchAnimeWorldProvider : MainAPI() {
                         // short.icu/SLUG — slug IS the abysscdn video ID
                         val videoId = link.trimEnd('/').substringAfterLast('/')
                         if (videoId.isBlank()) continue
-                        extractAbyssLinks(videoId, data, callback)
+                        extractAbyssLinks(videoId, data, subtitleCallback, callback)
                     }
                 } catch (_: Exception) {}
             }
