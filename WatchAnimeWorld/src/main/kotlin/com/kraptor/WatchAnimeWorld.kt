@@ -132,22 +132,20 @@ class WatchAnimeWorldProvider : MainAPI() {
 
         val allEpisodes = mutableListOf<Episode>()
 
-        // CRITICAL FIX: param renamed to "seasonNum" — avoids clash with
-        // Episode.season property inside newEpisode { } lambda (was causing null seasons)
         fun Element.toEpisode(seasonNum: Int): Episode? {
             val epHref = selectFirst("a.lnk-blk, a[href*='/episode/']")?.attr("href") ?: return null
-            val match  = Regex("""-(\d+)x(\d+)/?$""").find(epHref)
+            val match     = Regex("""-(\d+)x(\d+)/?$""").find(epHref)
             val urlSeason = match?.groupValues?.get(1)?.toIntOrNull() ?: seasonNum
-            val epNum  = if (urlSeason == seasonNum) match?.groupValues?.get(2)?.toIntOrNull() else null
-            val epTitle = selectFirst(".num-epi")?.text()?.cleanHtml()
+            val epNum     = if (urlSeason == seasonNum) match?.groupValues?.get(2)?.toIntOrNull() else null
+            val epTitle   = selectFirst(".num-epi")?.text()?.cleanHtml()
                 ?: selectFirst("h2.entry-title")?.text()?.cleanHtml()
                 ?: "Episode ${epNum ?: ""}"
-            val epThumb = selectFirst("img[data-src]")?.attr("data-src")?.let { fixImg(it) }
+            val epThumb   = selectFirst("img[data-src]")?.attr("data-src")?.let { fixImg(it) }
                 ?: selectFirst("img[src]")?.attr("src")?.let { fixImg(it) }
             return newEpisode(epHref) {
                 name      = epTitle
                 posterUrl = epThumb
-                season    = seasonNum   // no shadowing — "seasonNum" ≠ Episode.season
+                season    = seasonNum
                 episode   = epNum
             }
         }
@@ -216,7 +214,8 @@ class WatchAnimeWorldProvider : MainAPI() {
                 val src = iframe.attr("src").ifBlank { iframe.attr("data-src") }
                 if (src.isBlank()) return@forEach
                 try {
-                    val playerHtml = app.get(src, referer = mainUrl,
+                    val playerHtml = app.get(
+                        src, referer = mainUrl,
                         headers = mapOf("User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
                     ).text
                     val cdnHash = Regex("""as-cdn13\.top/cdn/down/([a-fA-F0-9]{30,})/""")
@@ -241,7 +240,7 @@ class WatchAnimeWorldProvider : MainAPI() {
                 }
             }
 
-        // Server 2 — player1.php / Abyss
+        // Server 2 — player1.php / Abyss (abysscdn.com — JS-protected, cannot extract direct URL)
         doc.select("iframe[src*='player1.php'], iframe[data-src*='player1.php']")
             .distinctBy {
                 (it.attr("src").ifBlank { it.attr("data-src") })
@@ -252,34 +251,17 @@ class WatchAnimeWorldProvider : MainAPI() {
                 val dataParam = Regex("""[?&]data=([^&\s]+)""")
                     .find(playerSrc)?.groupValues?.get(1) ?: return@forEach
                 try {
-                    val decoded = String(Base64.decode(URLDecoder.decode(dataParam, "UTF-8"), Base64.DEFAULT))
+                    val decoded = String(
+                        Base64.decode(URLDecoder.decode(dataParam, "UTF-8"), Base64.DEFAULT)
+                    )
                     val arr = JSONArray(decoded)
                     for (i in 0 until arr.length()) {
                         val obj  = arr.getJSONObject(i)
-                        val lang = obj.optString("language", "Unknown")
                         val link = obj.optString("link", "").trim()
                         if (link.isBlank()) continue
-                        val abyssId = link.trimEnd('/').substringAfterLast('/')
+                        val abyssId  = link.trimEnd('/').substringAfterLast('/')
                         val abyssUrl = "https://abysscdn.com/?v=$abyssId"
-                        try {
-                            extractAbyssCDN(abyssUrl, lang, callback)
-                        } catch (_: Exception) {
-                            try {
-                                loadExtractor(abyssUrl, data, subtitleCallback, callback)
-                            } catch (_: Exception) {
-                                callback.invoke(
-                                    newExtractorLink(
-                                        source = name,
-                                        name   = "$name [Abyss-$lang]",
-                                        url    = abyssUrl,
-                                        type   = ExtractorLinkType.VIDEO
-                                    ) {
-                                        referer = mainUrl
-                                        quality = Qualities.Unknown.value
-                                    }
-                                )
-                            }
-                        }
+                        try { loadExtractor(abyssUrl, data, subtitleCallback, callback) } catch (_: Exception) {}
                     }
                 } catch (_: Exception) {}
             }
@@ -291,18 +273,25 @@ class WatchAnimeWorldProvider : MainAPI() {
                 val src = iframe.attr("src").ifBlank { iframe.attr("data-src") }
                 if (src.isBlank()) return@forEach
                 try {
-                    val playerHtml = app.get(src, referer = mainUrl,
+                    val playerHtml = app.get(
+                        src, referer = mainUrl,
                         headers = mapOf("User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
                     ).text
                     val m3u8 = Regex("""https?://[^\s"'<>]+\.m3u8[^\s"'<>]*""").find(playerHtml)?.value
                     val mp4  = Regex("""https?://[^\s"'<>]+\.mp4[^\s"'<>]*""").find(playerHtml)?.value
                     when {
-                        m3u8 != null -> callback.invoke(newExtractorLink(source = name,
-                            name = "$name - MultiCloud2", url = m3u8, type = ExtractorLinkType.M3U8) {
-                            referer = src; quality = Qualities.Unknown.value })
-                        mp4  != null -> callback.invoke(newExtractorLink(source = name,
-                            name = "$name - MultiCloud2", url = mp4,  type = ExtractorLinkType.VIDEO) {
-                            referer = src; quality = Qualities.Unknown.value })
+                        m3u8 != null -> callback.invoke(
+                            newExtractorLink(
+                                source = name, name = "$name - MultiCloud2",
+                                url = m3u8, type = ExtractorLinkType.M3U8
+                            ) { referer = src; quality = Qualities.Unknown.value }
+                        )
+                        mp4 != null -> callback.invoke(
+                            newExtractorLink(
+                                source = name, name = "$name - MultiCloud2",
+                                url = mp4, type = ExtractorLinkType.VIDEO
+                            ) { referer = src; quality = Qualities.Unknown.value }
+                        )
                         else -> loadExtractor(src, data, subtitleCallback, callback)
                     }
                 } catch (_: Exception) {
@@ -319,25 +308,5 @@ class WatchAnimeWorldProvider : MainAPI() {
         }
 
         return true
-    }
-
-    private suspend fun extractAbyssCDN(abyssUrl: String, lang: String, callback: (ExtractorLink) -> Unit) {
-        val html = app.get(abyssUrl, referer = mainUrl,
-            headers = mapOf("User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120")
-        ).text
-        val b64 = Regex("""datas\s*=\s*"([A-Za-z0-9+/=]{20,})"""").find(html)?.groupValues?.get(1) ?: return
-        val json = try { String(Base64.decode(b64, Base64.DEFAULT)) } catch (_: Exception) { return }
-        val slug = Regex(""""slug"\s*:\s*"([^"]+)"""").find(json)?.groupValues?.get(1) ?: return
-        callback.invoke(
-            newExtractorLink(
-                source = name,
-                name   = "$name [Abyss-$lang]",
-                url    = "https://abysscdn.com/?v=$slug",
-                type   = ExtractorLinkType.VIDEO
-            ) {
-                referer = mainUrl
-                quality = Qualities.Unknown.value
-            }
-        )
     }
 }
