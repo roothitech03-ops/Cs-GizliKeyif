@@ -1,385 +1,354 @@
-package com.kraptor  // ← yahi line apne repo ke hisaab se rakho
+// WatchAnimeWorldProvider.kt
+package com.kraptor
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
-import com.lagradost.cloudstream3.utils.ExtractorLink
-import com.lagradost.cloudstream3.utils.ExtractorLinkType
-import com.lagradost.cloudstream3.utils.Qualities
+import com.lagradost.cloudstream3.utils.AppUtils.parseJson
+import com.lagradost.cloudstream3.utils.AppUtils.toJson
+import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
-import java.net.URLDecoder
-import android.util.Base64
-import org.json.JSONArray
-import org.json.JSONObject
 
 class WatchAnimeWorldProvider : MainAPI() {
 
     override var mainUrl = "https://watchanimeworld.net"
     override var name = "WatchAnimeWorld"
-    override var lang = "hi"
     override val hasMainPage = true
+    override var lang = "hi"
+    override val hasDownloadSupport = true
     override val supportedTypes = setOf(
         TvType.Anime,
         TvType.AnimeMovie,
-        TvType.Cartoon
+        TvType.OVA,
     )
 
-    // ─── Helpers ──────────────────────────────────────────────────────────────
-
-    private fun String.cleanHtml(): String = this
-        .replace(Regex("<[^>]*>"), "")
-        .replace("&amp;", "&")
-        .replace("&lt;",  "<")
-        .replace("&gt;",  ">")
-        .replace("&quot;", "\"")
-        .replace("&#39;", "'")
-        .trim()
-
-    private fun fixImg(raw: String): String {
-        val s = raw.trim()
-        return when {
-            s.startsWith("//")   -> "https:$s"
-            s.startsWith("/")    -> "$mainUrl$s"
-            s.startsWith("http") -> s
-            else                 -> s
-        }
-    }
-
-    private suspend fun getDoc(url: String, referer: String = mainUrl) =
-        app.get(url, headers = mapOf(
-            "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Referer"    to referer
-        )).document
-
-    // ─── AbyssCDN Link Extraction ─────────────────────────────────────────────
-    //
-    // AbyssCDN (abysscdn.com) delivers video via Firebase-authenticated GCS signed URLs.
-    // Raw sssrr.org CDN files are permanently encrypted — NOT valid MP4 containers.
-    // Emitting them directly causes ExoPlayer error 3003 (PARSING_CONTAINER_UNSUPPORTED).
-    // We pass the canonical abysscdn.com URL to loadExtractor so any installed extractor
-    // can handle it correctly without emitting encrypted raw files.
-
-    private suspend fun extractAbyssLinks(
-        videoId: String,
-        referer: String,
-        subtitleCallback: (SubtitleFile) -> Unit,
-        callback: (ExtractorLink) -> Unit
-    ) {
-        // AbyssCDN files on sssrr.org are permanently encrypted — emitting them
-        // directly causes ExoPlayer error 3003.  Pass the canonical abysscdn.com
-        // URL to loadExtractor so any installed AbyssCDN extractor can handle it.
-        // If none is installed this silently returns nothing (no error shown).
-        try {
-            loadExtractor(
-                "https://abysscdn.com/?v=$videoId",
-                referer,
-                subtitleCallback,
-                callback
-            )
-        } catch (_: Exception) {}
-    }
-
-    // ─── Main Page ────────────────────────────────────────────────────────────
-
-    override val mainPage = mainPageOf(
-        "$mainUrl/category/type/anime/"            to "Anime",
-        "$mainUrl/category/type/cartoon/"          to "Cartoons",
-        "$mainUrl/category/language/hindi/"        to "Hindi Dubbed",
-        "$mainUrl/category/language/tamil/"        to "Tamil Dubbed",
-        "$mainUrl/category/language/telugu/"       to "Telugu Dubbed",
-        "$mainUrl/category/language/english/"      to "English",
-        "$mainUrl/category/status/completed/"      to "Completed",
-        "$mainUrl/category/genre/action/"          to "Action",
-        "$mainUrl/category/genre/adventure/"       to "Adventure",
-        "$mainUrl/category/genre/fantasy/"         to "Fantasy",
-        "$mainUrl/category/genre/comedy/"          to "Comedy",
-        "$mainUrl/category/genre/drama/"           to "Drama",
-        "$mainUrl/category/genre/shounen/"         to "Shounen",
-        "$mainUrl/category/genre/romance/"         to "Romance",
-        "$mainUrl/category/genre/horror-genre/"    to "Horror",
-        "$mainUrl/category/genre/historical/"      to "Historical",
-        "$mainUrl/category/franchise/naruto/"      to "Naruto",
-        "$mainUrl/category/franchise/dragon-ball/" to "Dragon Ball",
-        "$mainUrl/category/franchise/pokemon/"     to "Pokemon",
-        "$mainUrl/category/franchise/doraemon/"    to "Doraemon",
-        "$mainUrl/category/franchise/ben-10/"      to "Ben 10",
-    )
-
-    override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val url = if (page == 1) request.data else "${request.data}page/$page/"
-        val doc = getDoc(url)
-        val list = doc.select("ul.post-lst li").mapNotNull { parseListing(it) }
-        val more = doc.selectFirst("a.next, .pagination .next, a[href*='/page/${page + 1}/']") != null
-        return newHomePageResponse(request.name, list, more)
-    }
-
-    private fun parseListing(el: Element): SearchResponse? {
-        val href = el.selectFirst("a.lnk-blk")?.attr("href")
-            ?: el.selectFirst("a[href*='/series/'], a[href*='/movies/']")?.attr("href")
-            ?: return null
-        if (href.isBlank()) return null
-
-        val title = el.selectFirst("h2.entry-title")?.text()?.cleanHtml()
-            ?: el.selectFirst("[class*='entry-title']")?.text()?.cleanHtml()
-            ?: el.selectFirst("img[alt]")?.attr("alt")?.cleanHtml()
-            ?: return null
-        if (title.isBlank()) return null
-
-        val rawImg = el.selectFirst("img[data-src]")?.attr("data-src")
-            ?: el.selectFirst("img[src]")?.attr("src")
-            ?: ""
-
-        return newAnimeSearchResponse(title, href, TvType.Anime) {
-            posterUrl = fixImg(rawImg)
-        }
-    }
-
-    // ─── Search ───────────────────────────────────────────────────────────────
-
-    override suspend fun search(query: String): List<SearchResponse> {
-        val doc = getDoc("$mainUrl/?s=${query.replace(" ", "+")}")
-        return doc.select("ul.post-lst li").mapNotNull { parseListing(it) }
-    }
-
-    // ─── Series Detail ────────────────────────────────────────────────────────
-
-    override suspend fun load(url: String): LoadResponse {
-        val doc = getDoc(url)
-
-        val title = doc.selectFirst("h1.entry-title")?.text()?.cleanHtml()
-            ?: doc.title().substringBefore(" - ").trim()
-
-        val rawPoster = doc.selectFirst("img[src*='tmdb'], img[src*='image.tmdb.org']")?.attr("src")
-            ?: doc.selectFirst("header img, .post-thumbnail img")?.attr("src")
-            ?: ""
-        val poster = fixImg(rawPoster)
-
-        val description = doc.selectFirst(".overview, .description, .entry-content > p")
-            ?.text()?.cleanHtml()
-
-        val genres = doc.select("a[href*='/category/genre/']").map { it.text().cleanHtml() }
-
-        val seasonEls = doc.select(".sel-temp a[data-season]")
-        val postId = seasonEls.firstOrNull()?.attr("data-post")
-            ?: Regex("""postid-(\d+)""")
-                .find(doc.selectFirst("body")?.attr("class") ?: "")
-                ?.groupValues?.get(1)
-            ?: ""
-
-        val nonce = Regex(""""nonce"\s*:\s*"([^"]+)"""")
-            .find(doc.html())?.groupValues?.get(1) ?: ""
-
-        val seasonNumbers: List<Int> = if (seasonEls.isNotEmpty()) {
-            seasonEls.mapNotNull { it.attr("data-season").toIntOrNull() }.distinct().sorted()
-        } else {
-            listOf(1)
-        }
-
-        val allEpisodes = mutableListOf<Episode>()
-
-        fun Element.toEpisode(seasonNum: Int): Episode? {
-            val epHref = selectFirst("a.lnk-blk, a[href*='/episode/']")?.attr("href")
-                ?: return null
-
-            val match     = Regex("""-(\d+)x(\d+)/?$""").find(epHref)
-            val urlSeason = match?.groupValues?.get(1)?.toIntOrNull() ?: seasonNum
-            val epNum     = if (urlSeason == seasonNum)
-                match?.groupValues?.get(2)?.toIntOrNull()
-            else null
-
-            val epTitle = selectFirst(".num-epi")?.text()?.cleanHtml()
-                ?: selectFirst("h2.entry-title")?.text()?.cleanHtml()
-                ?: "Episode ${epNum ?: ""}"
-
-            val epThumb = selectFirst("img[data-src]")?.attr("data-src")?.let { fixImg(it) }
-                ?: selectFirst("img[src]")?.attr("src")?.let { fixImg(it) }
-
-            return newEpisode(epHref) {
-                name      = epTitle
-                posterUrl = epThumb
-                season    = seasonNum
-                episode   = epNum
+    // ========================
+    // Companion Object
+    // ========================
+    companion object {
+        fun getType(t: String?): TvType {
+            return when {
+                t?.contains("Movie", true) == true -> TvType.AnimeMovie
+                t?.contains("OVA", true) == true -> TvType.OVA
+                else -> TvType.Anime
             }
         }
 
-        seasonNumbers.forEach { seasonNum ->
-            if (postId.isBlank()) return@forEach
-            try {
-                val resp = app.post(
-                    "$mainUrl/wp-admin/admin-ajax.php",
-                    data = mapOf(
-                        "action" to "action_select_season",
-                        "season" to seasonNum.toString(),
-                        "post"   to postId,
-                        "nonce"  to nonce
-                    ),
-                    headers = mapOf(
-                        "X-Requested-With" to "XMLHttpRequest",
-                        "Referer"          to url,
-                        "Origin"           to mainUrl,
-                        "Content-Type"     to "application/x-www-form-urlencoded"
-                    )
-                )
-                val body = resp.text.trim()
-                if (body == "0" || body == "-1" || body.isBlank()) return@forEach
-
-                val eps = resp.document.select("article.post, li article")
-                    .mapNotNull { it.toEpisode(seasonNum) }
-
-                if (eps.isEmpty()) return@forEach
-
-                if (eps.all { it.episode == null }) {
-                    eps.forEachIndexed { idx, ep ->
-                        allEpisodes.add(newEpisode(ep.data) {
-                            name      = ep.name
-                            posterUrl = ep.posterUrl
-                            season    = seasonNum
-                            episode   = idx + 1
-                        })
-                    }
-                } else {
-                    allEpisodes.addAll(eps)
-                }
-            } catch (_: Exception) {}
-        }
-
-        allEpisodes.sortWith(compareBy({ it.season ?: 0 }, { it.episode ?: 0 }))
-
-        return newTvSeriesLoadResponse(title, url, TvType.Anime, allEpisodes) {
-            posterUrl = poster
-            plot      = description
-            tags      = genres
+        fun getStatus(t: String?): ShowStatus {
+            return when (t?.trim()) {
+                "Completed" -> ShowStatus.Completed
+                "Ongoing" -> ShowStatus.Ongoing
+                else -> ShowStatus.Completed
+            }
         }
     }
 
-    // ─── Video Links ──────────────────────────────────────────────────────────
-    // Server 1 (MultiCloud)  – zephyrflick : hash → master.m3u8 (HLS)
-    // Server 2 (Abyss)       – player1.php → short.icu slug → abysscdn.com
-    //                           loadExtractor handles AbyssCDN URL
-    // Server 3 (MultiCloud2) – pixdrive.cfd (HLS or MP4 from page)
+    // ========================
+    // Main Page Categories
+    // ========================
+    override val mainPage = mainPageOf(
+        "$mainUrl/anime/?page=" to "Latest Anime",
+        "$mainUrl/anime/?type=Hindi+Dubbed&page=" to "Hindi Dubbed",
+        "$mainUrl/anime/?status=ongoing&page=" to "Ongoing Anime",
+        "$mainUrl/anime/?type=Movie&page=" to "Anime Movies",
+        "$mainUrl/anime/?type=OVA&page=" to "OVA",
+        "$mainUrl/anime/?sub=sub&page=" to "Subbed Anime",
+    )
 
+    // ========================
+    // Get Main Page
+    // ========================
+    override suspend fun getMainPage(
+        page: Int,
+        request: MainPageRequest
+    ): HomePageResponse {
+        val url = request.data + page
+        val document = app.get(url).document
+
+        val home = document.select("div.film_list-wrap div.flw-item, div.anime_list-wrap li").mapNotNull {
+            it.toSearchResult()
+        }
+
+        return newHomePageResponse(request.name, home)
+    }
+
+    // ========================
+    // Element to SearchResult
+    // ========================
+    private fun Element.toSearchResult(): AnimeSearchResponse? {
+        // Site structure ke hisab se selectors adjust karein
+        val title = this.selectFirst("h3.film-name a, h2.anime_name a")?.text()?.trim()
+            ?: return null
+        val href = fixUrl(
+            this.selectFirst("h3.film-name a, h2.anime_name a")?.attr("href") ?: return null
+        )
+        val posterUrl = this.selectFirst("img")?.let {
+            it.attr("data-src").ifEmpty { it.attr("src") }
+        }
+        val type = this.selectFirst("div.fd-infor span.fdi-type")?.text()
+
+        return newAnimeSearchResponse(title, href, getType(type)) {
+            this.posterUrl = posterUrl
+        }
+    }
+
+    // ========================
+    // Search
+    // ========================
+    override suspend fun search(query: String): List<SearchResponse> {
+        val url = "$mainUrl/?s=$query"
+        val document = app.get(url).document
+
+        return document.select("div.film_list-wrap div.flw-item, ul.anime_list li, div.anime-search-item")
+            .mapNotNull { it.toSearchResult() }
+    }
+
+    // ========================
+    // Load (Detail Page)
+    // ========================
+    override suspend fun load(url: String): LoadResponse? {
+        val document = app.get(url).document
+
+        // Basic Info
+        val title = document.selectFirst(
+            "h2.film-name, h1.anime_info h2, div.anis-content h2"
+        )?.text()?.trim() ?: return null
+
+        val poster = document.selectFirst(
+            "div.film-poster img, div.anime-image img"
+        )?.let {
+            it.attr("data-src").ifEmpty { it.attr("src") }
+        }
+
+        val description = document.selectFirst(
+            "div.film-description div.text, div.anime-description, p.overview"
+        )?.text()?.trim()
+
+        // Tags/Genres
+        val tags = document.select(
+            "div.film-info div.item-list a[href*=genre], a.genre-tag"
+        ).map { it.text().trim() }
+
+        // Details
+        val detailInfo = document.select("div.film-stats span.item, div.anime-detail li")
+
+        var type: String? = null
+        var status: String? = null
+        var episodes: Int? = null
+
+        detailInfo.forEach { item ->
+            val text = item.text()
+            when {
+                text.contains("Type:", true) ->
+                    type = text.replace("Type:", "").trim()
+                text.contains("Status:", true) ->
+                    status = text.replace("Status:", "").trim()
+                text.contains("Episodes:", true) ->
+                    episodes = text.replace("Episodes:", "").trim()
+                        .toIntOrNull()
+            }
+        }
+
+        // Episode List
+        val episodeList = loadEpisodes(document, url)
+
+        return newAnimeLoadResponse(title, url, getType(type)) {
+            this.posterUrl = poster
+            this.plot = description
+            this.tags = tags
+            this.showStatus = getStatus(status)
+            addEpisodes(DubStatus.Dubbed, episodeList)
+        }
+    }
+
+    // ========================
+    // Load Episodes
+    // ========================
+    private suspend fun loadEpisodes(
+        document: Document,
+        animeUrl: String
+    ): List<Episode> {
+        val episodes = mutableListOf<Episode>()
+
+        // Method 1: Direct episode links on page
+        val directEpisodes = document.select(
+            "div.ss-list a[href], ul.episodelist li a, div.episode-list a"
+        )
+
+        if (directEpisodes.isNotEmpty()) {
+            directEpisodes.forEachIndexed { index, el ->
+                val epUrl = fixUrl(el.attr("href"))
+                val epTitle = el.text().trim()
+                val epNum = el.attr("data-number").toIntOrNull()
+                    ?: epTitle.filter { it.isDigit() }.toIntOrNull()
+                    ?: (index + 1)
+
+                episodes.add(
+                    newEpisode(epUrl) {
+                        this.episode = epNum
+                        this.name = epTitle.ifEmpty { "Episode $epNum" }
+                    }
+                )
+            }
+        } else {
+            // Method 2: AJAX se episodes load karna
+            val animeId = document.selectFirst("[data-id], [id*=watch]")
+                ?.attr("data-id")
+                ?: animeUrl.split("/").lastOrNull { it.isNotEmpty() }
+
+            animeId?.let { id ->
+                tryAjaxEpisodes(id)?.let { ajaxEps ->
+                    episodes.addAll(ajaxEps)
+                }
+            }
+        }
+
+        return episodes.sortedBy { it.episode }
+    }
+
+    // ========================
+    // AJAX Episode Loader
+    // ========================
+    private suspend fun tryAjaxEpisodes(animeId: String): List<Episode>? {
+        return try {
+            val ajaxUrl = "$mainUrl/ajax/v2/episode/list/$animeId"
+            val response = app.get(
+                ajaxUrl,
+                headers = mapOf(
+                    "X-Requested-With" to "XMLHttpRequest",
+                    "Referer" to mainUrl
+                )
+            )
+
+            val json = response.parsedSafe<EpisodeResponse>()
+            val html = json?.html ?: return null
+
+            val doc = android.util.Xml.newPullParser().let {
+                org.jsoup.Jsoup.parse(html)
+            }
+
+            doc.select("a.ep-item, a[href*=episode]").mapIndexed { index, el ->
+                val epUrl = fixUrl(el.attr("href"))
+                val epNum = el.attr("data-number").toIntOrNull()
+                    ?: el.text().trim().toIntOrNull()
+                    ?: (index + 1)
+                val epTitle = el.attr("title").ifEmpty { "Episode $epNum" }
+
+                newEpisode(epUrl) {
+                    this.episode = epNum
+                    this.name = epTitle
+                }
+            }
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    // ========================
+    // Load Links (Video Sources)
+    // ========================
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val doc = getDoc(data)
+        val document = app.get(data).document
 
-        // ── Server 1: zephyrflick ─────────────────────────────────────────────
-        doc.select("iframe[src*='play.zephyrflick.top'], iframe[data-src*='play.zephyrflick.top']")
-            .distinctBy { it.attr("src").ifBlank { it.attr("data-src") } }
-            .forEach { iframe ->
-                val src = iframe.attr("src").ifBlank { iframe.attr("data-src") }
-                if (src.isBlank()) return@forEach
-                try {
-                    val playerHtml = app.get(
-                        src, referer = mainUrl,
-                        headers = mapOf("User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-                    ).text
-                    val cdnHash = Regex("""as-cdn13\.top/cdn/down/([a-fA-F0-9]{30,})/""")
-                        .find(playerHtml)?.groupValues?.get(1)
-                    if (!cdnHash.isNullOrBlank()) {
-                        callback.invoke(
-                            newExtractorLink(
-                                source = name,
-                                name   = "$name - MultiCloud",
-                                url    = "https://s7.as-cdn13.top/cdn/down/$cdnHash/master.m3u8",
-                                type   = ExtractorLinkType.M3U8
-                            ) {
-                                referer = "https://play.zephyrflick.top/"
-                                quality = Qualities.Unknown.value
-                            }
-                        )
-                    } else {
-                        loadExtractor(src, data, subtitleCallback, callback)
-                    }
-                } catch (_: Exception) {
-                    try { loadExtractor(src, data, subtitleCallback, callback) } catch (_: Exception) {}
-                }
+        // Method 1: Embedded iframes
+        val iframes = document.select("iframe[src], iframe[data-src]")
+        iframes.forEach { iframe ->
+            val iframeSrc = iframe.attr("src").ifEmpty { iframe.attr("data-src") }
+            if (iframeSrc.isNotEmpty()) {
+                loadExtractor(fixUrl(iframeSrc), data, subtitleCallback, callback)
             }
-
-        // ── Server 2: player1.php → AbyssCDN ─────────────────────────────────────
-        // player1.php?data=BASE64 where base64 = [{"link":"https://short.icu/VIDEO_ID"}]
-        // The short.icu slug = abysscdn.com video ID.
-        doc.select("iframe[src*='player1.php'], iframe[data-src*='player1.php']")
-            .distinctBy {
-                (it.attr("src").ifBlank { it.attr("data-src") })
-                    .substringAfter("data=").take(20)
-            }
-            .forEach { iframe ->
-                val playerSrc = iframe.attr("src").ifBlank { iframe.attr("data-src") }
-                val dataParam = Regex("""[?&]data=([^&\s]+)""")
-                    .find(playerSrc)?.groupValues?.get(1) ?: return@forEach
-                try {
-                    val decoded = String(
-                        Base64.decode(URLDecoder.decode(dataParam, "UTF-8"), Base64.DEFAULT)
-                    )
-                    val arr = JSONArray(decoded)
-                    for (i in 0 until arr.length()) {
-                        val obj  = arr.getJSONObject(i)
-                        val link = obj.optString("link", "").trim()
-                        if (link.isBlank()) continue
-                        val videoId = link.trimEnd('/').substringAfterLast('/')
-                        if (videoId.isBlank()) continue
-                        extractAbyssLinks(videoId, data, subtitleCallback, callback)
-                    }
-                } catch (_: Exception) {}
-            }
-
-        // ── Server 3: pixdrive.cfd (MultiCloud2) ─────────────────────────────
-        doc.select("iframe[src*='pixdrive.cfd'], iframe[data-src*='pixdrive.cfd']")
-            .distinctBy { it.attr("src").ifBlank { it.attr("data-src") } }
-            .forEach { iframe ->
-                val src = iframe.attr("src").ifBlank { iframe.attr("data-src") }
-                if (src.isBlank()) return@forEach
-                try {
-                    val playerHtml = app.get(
-                        src, referer = mainUrl,
-                        headers = mapOf("User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-                    ).text
-                    val m3u8 = Regex("""https?://[^\s"'<>]+\.m3u8[^\s"'<>]*""").find(playerHtml)?.value
-                    val mp4  = Regex("""https?://[^\s"'<>]+\.mp4[^\s"'<>]*""").find(playerHtml)?.value
-                    when {
-                        m3u8 != null -> callback.invoke(
-                            newExtractorLink(
-                                source = name,
-                                name   = "$name - MultiCloud2",
-                                url    = m3u8,
-                                type   = ExtractorLinkType.M3U8
-                            ) {
-                                referer = src
-                                quality = Qualities.Unknown.value
-                            }
-                        )
-                        mp4 != null -> callback.invoke(
-                            newExtractorLink(
-                                source = name,
-                                name   = "$name - MultiCloud2",
-                                url    = mp4,
-                                type   = ExtractorLinkType.VIDEO
-                            ) {
-                                referer = src
-                                quality = Qualities.Unknown.value
-                            }
-                        )
-                        else -> loadExtractor(src, data, subtitleCallback, callback)
-                    }
-                } catch (_: Exception) {
-                    try { loadExtractor(src, data, subtitleCallback, callback) } catch (_: Exception) {}
-                }
-            }
-
-        // ── Any other iframe servers ──────────────────────────────────────────
-        doc.select("div[id^='options-'] iframe[data-src]").forEach { iframe ->
-            val src = iframe.attr("data-src").trim()
-            if (src.isBlank()
-                || src.contains("player1.php")
-                || src.contains("zephyrflick")
-                || src.contains("pixdrive")
-            ) return@forEach
-            try { loadExtractor(src, data, subtitleCallback, callback) } catch (_: Exception) {}
         }
+
+        // Method 2: Direct video sources
+        document.select("source[src]").forEach { source ->
+            val src = source.attr("src")
+            val quality = when {
+                src.contains("1080") -> Qualities.P1080.value
+                src.contains("720") -> Qualities.P720.value
+                src.contains("480") -> Qualities.P480.value
+                src.contains("360") -> Qualities.P360.value
+                else -> Qualities.Unknown.value
+            }
+            callback(
+                newExtractorLink(
+                    source = this.name,
+                    name = this.name,
+                    url = src,
+                    type = ExtractorLinkType.M3U8
+                ) {
+                    this.quality = quality
+                }
+            )
+        }
+
+        // Method 3: AJAX video servers
+        tryLoadAjaxServers(data, document, subtitleCallback, callback)
 
         return true
     }
+
+    // ========================
+    // AJAX Video Servers
+    // ========================
+    private suspend fun tryLoadAjaxServers(
+        episodeUrl: String,
+        document: Document,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ) {
+        try {
+            val episodeId = document.selectFirst("[data-id], [id*=ep]")
+                ?.attr("data-id")
+                ?: return
+
+            val serversUrl = "$mainUrl/ajax/v2/episode/servers?episodeId=$episodeId"
+            val serversDoc = app.get(
+                serversUrl,
+                headers = mapOf(
+                    "X-Requested-With" to "XMLHttpRequest",
+                    "Referer" to episodeUrl
+                )
+            ).document
+
+            serversDoc.select("div.server-item, li.server-item").forEach { server ->
+                val serverId = server.attr("data-id")
+                val serverName = server.text().trim()
+
+                if (serverId.isNotEmpty()) {
+                    val sourceUrl = "$mainUrl/ajax/v2/episode/sources?id=$serverId"
+                    val sourceResp = app.get(
+                        sourceUrl,
+                        headers = mapOf(
+                            "X-Requested-With" to "XMLHttpRequest",
+                            "Referer" to episodeUrl
+                        )
+                    ).parsedSafe<SourceResponse>()
+
+                    sourceResp?.link?.let { link ->
+                        loadExtractor(link, episodeUrl, subtitleCallback, callback)
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            // Silently fail
+        }
+    }
+
+    // ========================
+    // Data Classes
+    // ========================
+    data class EpisodeResponse(
+        val html: String? = null,
+        val totalItems: Int? = null
+    )
+
+    data class SourceResponse(
+        val link: String? = null,
+        val type: String? = null,
+        val server: Int? = null
+    )
 }
