@@ -2,24 +2,8 @@ package com.kraptor
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
-import com.lagradost.cloudstream3.utils.ExtractorLink
-import com.lagradost.cloudstream3.LoadResponse
-import com.lagradost.cloudstream3.SearchResponse
-import com.lagradost.cloudstream3.MainAPI
-import com.lagradost.cloudstream3.TvType
-import com.lagradost.cloudstream3.MainPageRequest
-import com.lagradost.cloudstream3.HomePageResponse
-import com.lagradost.cloudstream3.Episode
-import com.lagradost.cloudstream3.newEpisode
-import com.lagradost.cloudstream3.newAnimeSearchResponse
-import com.lagradost.cloudstream3.newMovieSearchResponse
-import com.lagradost.cloudstream3.newTvSeriesLoadResponse
-import com.lagradost.cloudstream3.newMovieLoadResponse
-import com.lagradost.cloudstream3.fixUrl
-import com.lagradost.cloudstream3.fixUrlNull
-import com.lagradost.cloudstream3.app
+import com.lagradost.cloudstream3.LoadResponse.Companion.addTrailer
 import org.jsoup.nodes.Element
-import java.util.Base64
 
 class WatchAnimeWorldProvider : MainAPI() {
     override var mainUrl = "https://watchanimeworld.net"
@@ -27,100 +11,83 @@ class WatchAnimeWorldProvider : MainAPI() {
     override val hasMainPage = true
     override var lang = "hi"
     override val hasDownloadSupport = true
-    override val supportedTypes = setOf(
-        TvType.Anime,
-        TvType.AnimeMovie,
-        TvType.Cartoon
-    )
+    override val supportedTypes = setOf(TvType.Anime, TvType.AnimeMovie, TvType.OVA)
 
     override val mainPage = mainPageOf(
-        "$mainUrl/" to "Newest Drops",
-        "$mainUrl/series/page/" to "Series",
-        "$mainUrl/movies/page/" to "Movies",
-        "$mainUrl/category/anime/page/" to "Anime",
-        "$mainUrl/category/cartoon/page/" to "Cartoon"
+        "$mainUrl/trending?page=" to "Trending",
+        "$mainUrl/popular?page=" to "Popular",
+        "$mainUrl/latest-updates?page=" to "Latest Updates",
+        "$mainUrl/az-list?page=" to "Alphabetical List",
+        "$mainUrl/genre/action?page=" to "Action",
+        "$mainUrl/genre/adventure?page=" to "Adventure",
+        "$mainUrl/genre/comedy?page=" to "Comedy",
+        "$mainUrl/genre/drama?page=" to "Drama",
+        "$mainUrl/genre/fantasy?page=" to "Fantasy",
+        "$mainUrl/genre/horror?page=" to "Horror",
+        "$mainUrl/genre/mystery?page=" to "Mystery",
+        "$mainUrl/genre/romance?page=" to "Romance",
+        "$mainUrl/genre/sci-fi?page=" to "Sci-Fi",
+        "$mainUrl/genre/slice-of-life?page=" to "Slice of Life",
+        "$mainUrl/genre/sports?page=" to "Sports",
+        "$mainUrl/genre/supernatural?page=" to "Supernatural",
+        "$mainUrl/genre/thriller?page=" to "Thriller"
     )
 
     override suspend fun getMainPage(
         page: Int,
         request: MainPageRequest
     ): HomePageResponse {
-        val url = if (page <= 1) request.data else "${request.data}$page/"
-        val document = app.get(url).document
-        val home = document.select("article.post").mapNotNull {
-            it.toSearchResult()
+        val document = app.get(request.data + page).document
+        val items = document.select("div.item").mapNotNull { element ->
+            element.toSearchResult()
         }
-        return newHomePageResponse(request.name, home)
+
+        return newHomePageResponse(request.name, items)
     }
 
-    private fun Element.toSearchResult(): SearchResponse? {
-        val title = this.selectFirst(".entry-title, h2, h3")?.text() ?: return null
-        val href = fixUrl(this.selectFirst("a")?.attr("href") ?: return null)
-        val posterUrl = fixUrlNull(this.selectFirst("img")?.attr("src") ?: this.selectFirst("img")?.attr("data-src"))
+    private fun Element.toSearchResult(): AnimeSearchResponse? {
+        val title = this.selectFirst("h3.title")?.text() ?: return null
+        val href = this.selectFirst("a")?.attr("href") ?: return null
+        val posterUrl = this.selectFirst("img")?.attr("src") ?: return null
         
-        return if (href.contains("/movies/")) {
-            newMovieSearchResponse(title, href, TvType.AnimeMovie) {
-                this.posterUrl = posterUrl
-            }
-        } else {
-            newAnimeSearchResponse(title, href, TvType.Anime) {
-                this.posterUrl = posterUrl
-            }
+        return newAnimeSearchResponse(title, fixUrl(href), TvType.Anime) {
+            this.posterUrl = fixUrl(posterUrl)
         }
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        val document = app.get("$mainUrl/?s=$query").document
-        return document.select("article.post").mapNotNull {
-            it.toSearchResult()
+        val document = app.get("$mainUrl/search?keyword=$query").document
+        return document.select("div.item").mapNotNull { element ->
+            element.toSearchResult()
         }
     }
 
-    override suspend fun load(url: String): LoadResponse {
+    override suspend fun load(url: String): LoadResponse? {
         val document = app.get(url).document
-
-        val title = document.selectFirst("h1")?.text() ?: return throw ErrorLoadingException("No title found")
-        val poster = fixUrlNull(document.selectFirst("div.poster img")?.attr("src") ?: document.selectFirst("div.poster img")?.attr("data-src"))
-        val tags = document.select("div.sgeneros a").map { it.text() }
-        val year = document.selectFirst("span.date")?.text()?.trim()?.take(4)?.toIntOrNull()
-        val description = document.selectFirst("div.wp-content p, div.description p")?.text()
         
-        val isMovie = url.contains("/movies/")
-        val tvType = if (isMovie) TvType.AnimeMovie else TvType.Anime
-
-        if (isMovie) {
-            return newMovieLoadResponse(title, url, tvType, url) {
-                this.posterUrl = poster
-                this.year = year
-                this.plot = description
-                this.tags = tags
-            }
-        } else {
-            val episodes = mutableListOf<Episode>()
-            document.select("#episode_by_temp li").forEach { epElement ->
-                val epHref = fixUrlNull(epElement.selectFirst("a")?.attr("href")) ?: return@forEach
-                val epTitle = epElement.selectFirst(".entry-title, h2")?.text()
-                val meta = epElement.selectFirst(".num-epi")?.text() // Format: 1x1
-                val seasonNum = meta?.split("x")?.firstOrNull()?.trim()?.toIntOrNull()
-                val epNum = meta?.split("x")?.lastOrNull()?.trim()?.toIntOrNull()
-                val epPoster = fixUrlNull(epElement.selectFirst("img")?.attr("src") ?: epElement.selectFirst("img")?.attr("data-src"))
-
-                episodes.add(
-                    newEpisode(epHref) {
-                        this.name = epTitle
-                        this.season = seasonNum
-                        this.episode = epNum
-                        this.posterUrl = epPoster
-                    }
-                )
-            }
-
-            return newTvSeriesLoadResponse(title, url, tvType, episodes) {
-                this.posterUrl = poster
-                this.year = year
-                this.plot = description
-                this.tags = tags
-            }
+        val title = document.selectFirst("h1.title")?.text() ?: return null
+        val poster = document.selectFirst("div.poster img")?.attr("src")
+        val year = document.selectFirst("span.year")?.text()?.toIntOrNull()
+        val description = document.selectFirst("div.description")?.text()
+        val tags = document.select("div.genres a").map { it.text() }
+        val rating = document.selectFirst("span.rating")?.text()?.toRatingInt()
+        
+        val episodes = document.select("div.episodes-list a").mapNotNull {
+            val epTitle = it.selectFirst("span.ep-title")?.text() ?: return@mapNotNull null
+            val epUrl = it.attr("href")
+            Episode(
+                data = epUrl,
+                name = epTitle
+            )
+        }.reversed()
+        
+        return newAnimeLoadResponse(title, url, TvType.Anime) {
+            this.posterUrl = poster
+            this.year = year
+            this.plot = description
+            this.tags = tags
+            this.rating = rating
+            addEpisodes(DubStatus.Subbed, episodes)
         }
     }
 
@@ -132,51 +99,55 @@ class WatchAnimeWorldProvider : MainAPI() {
     ): Boolean {
         val document = app.get(data).document
         
-        // Method 1: Direct Iframes (Server 1)
+        // Try to find iframe sources
         document.select("iframe").forEach { iframe ->
             val src = iframe.attr("src")
-            if (src.isNotBlank() && !src.contains("google.com") && !src.contains("facebook.com")) {
-                loadExtractor(src, data, subtitleCallback, callback)
+            if (src.isNotEmpty()) {
+                loadExtractor(fixUrl(src), data, subtitleCallback, callback)
             }
         }
         
-        // Method 2: API Player (Server 2)
-        // Check for the player1.php pattern in scripts
+        // Try to find script tags with video sources
         document.select("script").forEach { script ->
-            val scriptData = script.data()
-            if (scriptData.contains("player1.php?data=")) {
-                val dataParam = Regex("""player1\.php\?data=([^"']+)""").find(scriptData)?.groupValues?.get(1)
-                if (dataParam != null) {
-                    try {
-                        val decoded = String(Base64.getDecoder().decode(dataParam))
-                        val jsonArray = AppUtils.parseJson<List<PlayerItem>>(decoded)
-                        jsonArray.forEach { item ->
-                            if (!item.link.isNullOrBlank()) {
-                                loadExtractor(item.link, data, subtitleCallback, callback)
-                            }
-                        }
-                    } catch (e: Exception) {
-                        // Fallback: try calling the API directly if possible
-                        val apiUrl = "$mainUrl/api/player1.php?data=$dataParam"
-                        val apiResponse = app.get(apiUrl).text
-                        try {
-                            val jsonArray = AppUtils.parseJson<List<PlayerItem>>(apiResponse)
-                            jsonArray.forEach { item ->
-                                if (!item.link.isNullOrBlank()) {
-                                    loadExtractor(item.link, data, subtitleCallback, callback)
-                                }
-                            }
-                        } catch (e2: Exception) {}
+            if (script.data().contains("sources") || script.data().contains("file")) {
+                val scriptData = script.data()
+                
+                // Extract direct video links
+                val videoRegex = Regex("""["']file["']\s*:\s*["']([^"']+)["']""")
+                videoRegex.findAll(scriptData).forEach { match ->
+                    val videoUrl = match.groupValues[1]
+                    if (videoUrl.isNotEmpty()) {
+                        callback.invoke(
+                            ExtractorLink(
+                                name = name,
+                                url = videoUrl,
+                                referer = data,
+                                quality = Qualities.Unknown.value,
+                                isM3u8 = videoUrl.contains(".m3u8")
+                            )
+                        )
+                    }
+                }
+                
+                // Extract m3u8 links
+                val m3u8Regex = Regex("""["']([^"']*\.m3u8[^"']*)["']""")
+                m3u8Regex.findAll(scriptData).forEach { match ->
+                    val m3u8Url = match.groupValues[1]
+                    if (m3u8Url.isNotEmpty()) {
+                        callback.invoke(
+                            ExtractorLink(
+                                name = name,
+                                url = m3u8Url,
+                                referer = data,
+                                quality = Qualities.Unknown.value,
+                                isM3u8 = true
+                            )
+                        )
                     }
                 }
             }
         }
-
+        
         return true
     }
-
-    data class PlayerItem(
-        val language: String? = null,
-        val link: String? = null
-    )
 }
