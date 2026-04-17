@@ -2,86 +2,73 @@ package com.kraptor
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
+import com.lagradost.cloudstream3.utils.ExtractorApi
+import com.lagradost.cloudstream3.utils.Quality
+import com.lagradost.cloudstream3.utils.ExtractorLink
 import org.jsoup.nodes.Element
 
-class WatchAnimeWorldProvider : MainAPI() {
+class WatchAnimeWorld : MainAPI() {
     override var mainUrl = "https://watchanimeworld.net"
     override var name = "WatchAnimeWorld"
     override val hasMainPage = true
-    override var lang = "hi"
+    override val lang = "hi"
     override val hasDownloadSupport = true
     override val supportedTypes = setOf(TvType.Anime, TvType.AnimeMovie, TvType.OVA)
 
     override val mainPage = mainPageOf(
-        "\$mainUrl/trending?page=" to "Trending",
-        "\$mainUrl/popular?page=" to "Popular",
-        "\$mainUrl/latest-updates?page=" to "Latest Updates",
-        "\$mainUrl/az-list?page=" to "Alphabetical List",
-        "\$mainUrl/genre/action?page=" to "Action",
-        "\$mainUrl/genre/adventure?page=" to "Adventure",
-        "\$mainUrl/genre/comedy?page=" to "Comedy",
-        "\$mainUrl/genre/drama?page=" to "Drama",
-        "\$mainUrl/genre/fantasy?page=" to "Fantasy",
-        "\$mainUrl/genre/horror?page=" to "Horror",
-        "\$mainUrl/genre/mystery?page=" to "Mystery",
-        "\$mainUrl/genre/romance?page=" to "Romance",
-        "\$mainUrl/genre/sci-fi?page=" to "Sci-Fi",
-        "\$mainUrl/genre/slice-of-life?page=" to "Slice of Life",
-        "\$mainUrl/genre/sports?page=" to "Sports",
-        "\$mainUrl/genre/supernatural?page=" to "Supernatural",
-        "\$mainUrl/genre/thriller?page=" to "Thriller"
+        "$mainUrl/trending?page=" to "Trending",
+        "$mainUrl/popular?page=" to "Popular",
+        "$mainUrl/latest-updates?page=" to "Latest Updates",
+        "$mainUrl/az-list?page=" to "Alphabetical List"
     )
 
     override suspend fun getMainPage(
         page: Int,
         request: MainPageRequest
     ): HomePageResponse {
-        val response = app.get(request.data + page).let { response ->
-            if (response.code == 404) return@let null
-            response
+        val response = app.get(request.data + page).let { 
+            if (it.code == 404) null else it 
         } ?: return newHomePageResponse(request.name, emptyList())
 
         val document = response.document
         val items = document.select("div.item").mapNotNull { element ->
-            element.toSearchResult(response.mainUrl)
+            element.toSearchResult()
         }
 
         return newHomePageResponse(request.name, items)
     }
 
-    private fun Element.toSearchResult(baseUrl: String): AnimeSearchResponse? {
+    private fun Element.toSearchResult(): AnimeSearchResponse? {
         val title = this.selectFirst("h3.title")?.text()?.trim() ?: return null
         val href = this.selectFirst("a")?.attr("href")?.trim() ?: return null
         val posterUrl = this.selectFirst("img")?.attr("src")?.trim()
         
-        if (posterUrl == null || !posterUrl.startsWith("http")) return null
+        if (posterUrl.isNullOrBlank()) return null
 
+        val url = if (href.startsWith("/")) "$mainUrl$href" else href
+        
         return newAnimeSearchResponse(
             title = title,
-            url = if (href.startsWith("/")) "\$baseUrl\$href" else href,
+            url = url,
             type = TvType.Anime
         ) {
-            this.posterUrl = fixUrl(baseUrl, posterUrl)
+            this.posterUrl = fixUrl(url, posterUrl)
         }
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
         val url = "$mainUrl/search?keyword=${Uri.encode(query)}"
-        val response = app.get(url).let { response ->
-            if (response.code == 404) return@let null
-            response
+        val response = app.get(url).let {
+            if (it.code == 404) null else it
         } ?: return emptyList()
 
         val document = response.document
-        return document.select("div.item").mapNotNull { element ->
-            element.toSearchResult(mainUrl)
-        }
+        return document.select("div.item").mapNotNull { it.toSearchResult() }
     }
 
     override suspend fun load(url: String): LoadResponse? {
-        val response = app.get(url).let { response ->
-            if (response.code == 404) return@let null
-            response
+        val response = app.get(url).let {
+            if (it.code == 404) null else it
         } ?: return null
 
         val document = response.document
@@ -91,8 +78,9 @@ class WatchAnimeWorldProvider : MainAPI() {
         val year = document.selectFirst("span.year")?.text()?.trim()?.toIntOrNull()
         val description = document.selectFirst("div.description")?.text()?.trim()
         val tags = document.select("div.genres a").map { it.text().trim() }
-        val rating = document.selectFirst("span.rating")?.text()?.trim()?.toRatingInt()
-        
+        val scoreText = document.selectFirst("span.rating")?.text()?.trim()
+        val score = scoreText?.toDoubleOrNull()
+
         val episodeLinks = document.select("div.episodes-list a")
         val episodes = episodeLinks.mapNotNull { element ->
             val epTitle = element.selectFirst("span.ep-title")?.text()?.trim()
@@ -102,7 +90,7 @@ class WatchAnimeWorldProvider : MainAPI() {
                 Episode(
                     data = epUrl,
                     name = epTitle,
-                    url = if (epUrl.startsWith("/")) "\$mainUrl\$epUrl" else epUrl
+                    url = if (epUrl.startsWith("/")) "$mainUrl$epUrl" else epUrl
                 )
             } else null
         }.reversed()
@@ -114,11 +102,11 @@ class WatchAnimeWorldProvider : MainAPI() {
             url = url,
             type = TvType.Anime
         ) {
-            this.posterUrl = if (poster != null) fixUrl(mainUrl, poster) else null
+            this.posterUrl = if (poster != null) fixUrl(url, poster) else null
             this.year = year
             this.plot = description
             this.tags = tags
-            this.rating = rating
+            this.score = score?.toFloatOrNull()
             addEpisodes(DubStatus.Subbed, episodes)
         }
     }
@@ -129,30 +117,67 @@ class WatchAnimeWorldProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val response = app.get(data).let { response ->
-            if (response.code == 404) return@let null
-            response
+        val response = app.get(data).let {
+            if (it.code == 404) null else it
         } ?: return false
 
         val document = response.document
         
-        // Extract iframes
+        // Extract video sources from script tags
+        document.select("script").forEach { script ->
+            val scriptData = script.data().trim()
+            if (scriptData.contains("sources") || scriptData.contains("file")) {
+                // Extract direct video links
+                val videoRegex = Regex("""["']file["']\s*:\s*["']([^"'\s]+)""")
+                videoRegex.findAll(scriptData).forEach { matchResult ->
+                    val videoUrl = matchResult.groupValues[1]
+                    if (videoUrl.isNotEmpty()) {
+                        callback.invoke(
+                            ExtractorLink(
+                                source = name,
+                                name = name,
+                                url = videoUrl,
+                                referer = data,
+                                quality = if (videoUrl.contains(".m3u8")) Quality.M3U8 else Quality.Unknown,
+                                isM3u8 = videoUrl.contains(".m3u8")
+                            )
+                        )
+                    }
+                }
+            }
+        }
+
+        // Extract from iframes
         document.select("iframe").forEach { iframe ->
             val src = iframe.attr("src")
             if (src.isNotEmpty()) {
-                val iframeUrl = if (src.startsWith("http")) src else "\$mainUrl\$src"
+                val iframeUrl = if (src.startsWith("http")) src else "$mainUrl$src"
                 try {
                     val iframeDoc = app.get(iframeUrl).document
-                    // Extract video sources from iframe content if needed
-                    val videoSource = iframeDoc.select("video > source").first() ?: iframeDoc.select("video source").first()
+                    val videoSource = iframeDoc.selectFirst("video > source") ?: iframeDoc.selectFirst("video source")
                     val srcAttr = videoSource?.attr("src") ?: ""
                     
                     if (srcAttr.isNotEmpty()) {
                         callback.invoke(
                             ExtractorLink(
-                                source = "WatchAnimeWorld",
-                                name = "WatchAnimeWorld",
+                                source = name,
+                                name = name,
                                 url = srcAttr,
                                 referer = iframeUrl,
-                                quality = Qualities.Unknown.value,
-                                isM3
+                                quality = if (srcAttr.contains(".m3u8")) Quality.M3U8 else Quality.Unknown,
+                                isM3u8 = srcAttr.contains(".m3u8")
+                            )
+                        )
+                    }
+                } catch (e: Exception) {
+                    // Ignore iframe errors
+                }
+            }
+        }
+
+        // Try to load streams from known providers
+        loadExtractor(data, data, subtitleCallback, callback)
+
+        return true
+    }
+}
