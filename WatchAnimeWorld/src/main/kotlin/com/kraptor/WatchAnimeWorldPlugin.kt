@@ -5,9 +5,11 @@ import com.lagradost.cloudstream3.plugins.Plugin
 import android.content.Context
 
 @CloudstreamPlugin
-class WatchAnimeWorldPlugin: Plugin() {
+class WatchAnimeWorldPlugin : Plugin() {
     override fun load(context: Context) {
-        // All providers should be added in this manner. Please don't edit the providers list directly.
-        registerMainAPI(WatchAnimeWorldProvider())
+        // Register the main API
+        registerMainAPI(WatchAnimeWorld())
+        // Register any extractors if needed
+        // registerExtractorAPI(YOUR_EXTRACTOR_NAME)
     }
 }
