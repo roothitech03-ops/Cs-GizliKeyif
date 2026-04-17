@@ -2,9 +2,6 @@ package com.kraptor
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
-import com.lagradost.cloudstream3.utils.ExtractorApi
-import com.lagradost.cloudstream3.utils.Quality
-import com.lagradost.cloudstream3.utils.ExtractorLink
 import org.jsoup.nodes.Element
 
 class WatchAnimeWorld : MainAPI() {
@@ -48,16 +45,16 @@ class WatchAnimeWorld : MainAPI() {
         val url = if (href.startsWith("/")) "$mainUrl$href" else href
         
         return newAnimeSearchResponse(
-            title = title,
+            name = title,
             url = url,
             type = TvType.Anime
         ) {
-            this.posterUrl = fixUrl(url, posterUrl)
+            this.posterUrl = if (posterUrl.startsWith("http")) posterUrl else "$mainUrl$posterUrl"
         }
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        val url = "$mainUrl/search?keyword=${Uri.encode(query)}"
+        val url = "$mainUrl/search?keyword=${query.replace(" ", "%20")}"
         val response = app.get(url).let {
             if (it.code == 404) null else it
         } ?: return emptyList()
@@ -79,7 +76,7 @@ class WatchAnimeWorld : MainAPI() {
         val description = document.selectFirst("div.description")?.text()?.trim()
         val tags = document.select("div.genres a").map { it.text().trim() }
         val scoreText = document.selectFirst("span.rating")?.text()?.trim()
-        val score = scoreText?.toDoubleOrNull()
+        val score = scoreText?.toDoubleOrNull()?.toFloat()
 
         val episodeLinks = document.select("div.episodes-list a")
         val episodes = episodeLinks.mapNotNull { element ->
@@ -87,7 +84,7 @@ class WatchAnimeWorld : MainAPI() {
             val epUrl = element.attr("href").trim()
             
             if (epTitle != null && epUrl.isNotEmpty()) {
-                Episode(
+                newEpisode(
                     data = epUrl,
                     name = epTitle,
                     url = if (epUrl.startsWith("/")) "$mainUrl$epUrl" else epUrl
@@ -98,15 +95,17 @@ class WatchAnimeWorld : MainAPI() {
         if (episodes.isEmpty()) return null
 
         return newAnimeLoadResponse(
-            title = title,
+            name = title,
             url = url,
             type = TvType.Anime
         ) {
-            this.posterUrl = if (poster != null) fixUrl(url, poster) else null
+            this.posterUrl = if (poster != null) {
+                if (poster.startsWith("http")) poster else "$mainUrl$poster"
+            } else null
             this.year = year
             this.plot = description
             this.tags = tags
-            this.score = score?.toFloatOrNull()
+            this.score = score
             addEpisodes(DubStatus.Subbed, episodes)
         }
     }
@@ -133,12 +132,12 @@ class WatchAnimeWorld : MainAPI() {
                     val videoUrl = matchResult.groupValues[1]
                     if (videoUrl.isNotEmpty()) {
                         callback.invoke(
-                            ExtractorLink(
+                            newExtractorLink(
                                 source = name,
                                 name = name,
                                 url = videoUrl,
                                 referer = data,
-                                quality = if (videoUrl.contains(".m3u8")) Quality.M3U8 else Quality.Unknown,
+                                quality = Qualities.Unknown.value,
                                 isM3u8 = videoUrl.contains(".m3u8")
                             )
                         )
@@ -159,12 +158,12 @@ class WatchAnimeWorld : MainAPI() {
                     
                     if (srcAttr.isNotEmpty()) {
                         callback.invoke(
-                            ExtractorLink(
+                            newExtractorLink(
                                 source = name,
                                 name = name,
                                 url = srcAttr,
                                 referer = iframeUrl,
-                                quality = if (srcAttr.contains(".m3u8")) Quality.M3U8 else Quality.Unknown,
+                                quality = Qualities.Unknown.value,
                                 isM3u8 = srcAttr.contains(".m3u8")
                             )
                         )
