@@ -24,8 +24,7 @@ open class MoviesmodProvider : MainAPI() {
     override val hasDownloadSupport = true
     val cinemeta_url = "https://aiometadata.elfhosted.com/stremio/9197a4a9-2f5b-4911-845e-8704c520bdf7/meta"
     private val cfKiller by lazy { CloudflareKiller() }
-    private val streamExtractor = StreamExtractor()
-    
+
     override val supportedTypes = setOf(
         TvType.Movie,
         TvType.TvSeries,
@@ -65,14 +64,9 @@ open class MoviesmodProvider : MainAPI() {
         "/animation-web-series/page/" to "Animation",
     )
 
-    override suspend fun getMainPage(
-        page: Int,
-        request: MainPageRequest
-    ): HomePageResponse {
+    override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val document = app.get(mainUrl + request.data + page, interceptor = cfKiller).document
-        val home = document.select("article").mapNotNull {
-            it.toSearchResult()
-        }
+        val home = document.select("article").mapNotNull { it.toSearchResult() }
         return newHomePageResponse(request.name, home)
     }
 
@@ -91,8 +85,7 @@ open class MoviesmodProvider : MainAPI() {
     override suspend fun search(query: String, page: Int): SearchResponseList? {
         val document = app.get("$mainUrl/?s=$query" + if (page > 1) "/page/$page" else "", interceptor = cfKiller).document
         val results = document.select("article").mapNotNull { it.toSearchResult() }
-        val hasNext = results.isNotEmpty()
-        return newSearchResponseList(results, hasNext)
+        return newSearchResponseList(results, results.isNotEmpty())
     }
 
     override suspend fun load(url: String): LoadResponse? {
@@ -136,16 +129,6 @@ open class MoviesmodProvider : MainAPI() {
         }
 
         if (tvtype == "series") {
-            if (title != ogTitle) {
-                val checkSeason = Regex("""Season\s*\d*1|S\s*\d*1""").find(ogTitle)
-                if (checkSeason == null) {
-                    val seasonText = Regex("""Season\s*\d+|S\s*\d+""").find(ogTitle)?.value
-                    if (seasonText != null) {
-                        title = title + " " + seasonText
-                    }
-                }
-            }
-
             val tvSeriesEpisodes = mutableListOf<Episode>()
             val episodesMap = ConcurrentHashMap<Pair<Int, Int>, MutableList<String>>()
             val buttons = document.select("a.maxbutton-episode-links,.maxbutton-g-drive,.maxbutton-af-download")
@@ -199,28 +182,14 @@ open class MoviesmodProvider : MainAPI() {
             }
 
             for ((key, value) in episodesMap.toSortedMap(compareBy({ it.first }, { it.second }))) {
-                val episodeInfo = if (imdbId.isNotEmpty()) {
-                    try {
-                        val jsonResponse = app.get("$cinemeta_url/$tvtype/$imdbId.json").text
-                        val responseData = tryParseJson<ResponseData>(jsonResponse)
-                        responseData?.meta?.videos?.find { it.season == key.first && it.episode == key.second }
-                    } catch (e: Exception) {
-                        null
-                    }
-                } else null
-
-                val data = value.distinct().map { source ->
-                    EpisodeLink(source)
-                }
+                val data = value.distinct().map { source -> EpisodeLink(source) }
 
                 if (data.isNotEmpty()) {
                     tvSeriesEpisodes.add(
                         newEpisode(data) {
-                            this.name = episodeInfo?.name ?: episodeInfo?.title ?: "Episode ${key.second}"
                             this.season = key.first
                             this.episode = key.second
-                            this.posterUrl = episodeInfo?.thumbnail ?: posterUrl
-                            this.description = episodeInfo?.overview ?: ""
+                            this.posterUrl = posterUrl
                         }
                     )
                 }
@@ -241,7 +210,6 @@ open class MoviesmodProvider : MainAPI() {
         } else {
             val data = mutableListOf<EpisodeLink>()
 
-            // Strategy 1: maxbutton-download-links
             document.select("a.maxbutton-download-links").forEach {
                 var link = it.attr("href")
                 if (link.contains("url=")) {
@@ -253,7 +221,6 @@ open class MoviesmodProvider : MainAPI() {
                 }
             }
 
-            // Strategy 2: episodes.modpro.blog links
             if (data.isEmpty()) {
                 document.select("a.maxbutton").forEach { button ->
                     val buttonHref = button.attr("href")
@@ -267,13 +234,12 @@ open class MoviesmodProvider : MainAPI() {
                                 }
                             }
                         } catch (e: Exception) {
-                            Log.d("Moviesmod", "Error loading episode links: ${e.message}")
+                            Log.d("Moviesmod", "Error: ${e.message}")
                         }
                     }
                 }
             }
 
-            // Strategy 3: Direct page links
             if (data.isEmpty()) {
                 document.select("a[href*=unblockedgames], a[href*=driveseed], a[href*=driveleech], a[href*=gdflix], a[href*=vcloud], a[href*=hubcloud], a[href*=drivefire], a[href*=fastdrive], a[href*=drivehub]").forEach {
                     val href = it.attr("href")
@@ -305,69 +271,26 @@ open class MoviesmodProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val sources = parseJson<ArrayList<EpisodeLink>>(data)
-        
-        sources.amap { episodeLink ->
-            var source = episodeLink.source
-            
-            try {
-                // For unblockedgames: Use advanced extraction
-                if (source.contains("unblockedgames", ignoreCase = true)) {
+        sources.amap {
+            var source = it.source
+            if (source.contains("unblockedgames", ignoreCase = true)) {
+                source = bypass(source) ?: source
+            }
+
+            when {
+                source.contains("driveseed", ignoreCase = true) || source.contains("driveleech", ignoreCase = true) -> {
                     try {
-                        val extractedLinks = streamExtractor.extractUnblockedGames(source)
-                        extractedLinks.forEach { link ->
-                            try {
-                                loadExtractor(link, "", subtitleCallback, callback)
-                            } catch (e: Exception) {
-                                Log.d("Moviesmod", "Extractor failed for: $link - ${e.message}")
-                            }
-                        }
-                    } catch (e: Exception) {
-                        Log.d("Moviesmod", "unblockedgames extraction error: ${e.message}")
-                        // Fallback: Try direct extraction
-                        try {
-                            loadExtractor(source, "", subtitleCallback, callback)
-                        } catch (ex: Exception) {
-                            Log.d("Moviesmod", "Fallback extraction failed")
-                        }
-                    }
-                }
-                // For drive pages: Use multiple extraction methods
-                else if (source.contains("drive", ignoreCase = true) || 
-                         source.contains("driveleech", ignoreCase = true) ||
-                         source.contains("driveseed", ignoreCase = true)) {
-                    try {
-                        // First try: Driveleech class
                         Driveleech().getUrl(source, "", subtitleCallback, callback)
                     } catch (e: Exception) {
-                        Log.d("Moviesmod", "Driveleech failed: ${e.message}")
-                        // Second try: Drive page extraction
-                        try {
-                            val extractedLinks = streamExtractor.extractFromDrivePage(source)
-                            extractedLinks.forEach { link ->
-                                try {
-                                    loadExtractor(link, "", subtitleCallback, callback)
-                                } catch (ex: Exception) {
-                                    Log.d("Moviesmod", "Extractor failed for drive link")
-                                }
-                            }
-                        } catch (ex: Exception) {
-                            Log.d("Moviesmod", "Drive page extraction failed")
-                        }
-                    }
-                }
-                // For other sources: Direct extraction
-                else {
-                    try {
+                        Log.d("Moviesmod", "Driveleech error: ${e.message}")
                         loadExtractor(source, "", subtitleCallback, callback)
-                    } catch (e: Exception) {
-                        Log.d("Moviesmod", "Generic extraction failed for: $source - ${e.message}")
                     }
                 }
-            } catch (e: Exception) {
-                Log.d("Moviesmod", "Error processing link: ${e.message}")
+                else -> {
+                    loadExtractor(source, "", subtitleCallback, callback)
+                }
             }
         }
-        
         return true
     }
 
