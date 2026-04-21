@@ -239,6 +239,7 @@ open class MoviesmodProvider : MainAPI() {
         } else {
             val data = mutableListOf<EpisodeLink>()
 
+            // First try: maxbutton-download-links
             document.select("a.maxbutton-download-links").mapNotNull {
                 var link = it.attr("href")
                 if (link.contains("url=")) {
@@ -255,6 +256,7 @@ open class MoviesmodProvider : MainAPI() {
                 }
             }.forEach { data.add(it) }
 
+            // Second try: episodes.modpro.blog
             if (data.isEmpty()) {
                 document.select("a.maxbutton").forEach { button ->
                     val buttonHref = button.attr("href")
@@ -274,6 +276,7 @@ open class MoviesmodProvider : MainAPI() {
                 }
             }
 
+            // Third try: direct links on page
             if (data.isEmpty()) {
                 document.select("a[href*=unblockedgames], a[href*=driveseed], a[href*=driveleech], a[href*=gdflix], a[href*=vcloud], a[href*=hubcloud], a[href*=drivefire], a[href*=fastdrive], a[href*=drivehub]").forEach {
                     val href = it.attr("href")
@@ -307,34 +310,70 @@ open class MoviesmodProvider : MainAPI() {
         val sources = parseJson<ArrayList<EpisodeLink>>(data)
         sources.amap {
             var source = it.source
-            if (source.contains("unblockedgames", ignoreCase = true)) {
-                source = bypass(source) ?: source
-            }
-
+            
             when {
+                source.contains("unblockedgames", ignoreCase = true) -> {
+                    try {
+                        loadExtractor(source, "", subtitleCallback, callback)
+                    } catch (e: Exception) {
+                        Log.d("Error", "unblockedgames extraction failed: ${e.message}")
+                    }
+                }
                 source.contains("driveseed", ignoreCase = true) || source.contains("driveleech", ignoreCase = true) -> {
-                    Driveleech().getUrl(source, "", subtitleCallback, callback)
+                    try {
+                        Driveleech().getUrl(source, "", subtitleCallback, callback)
+                    } catch (e: Exception) {
+                        Log.d("Error", "Driveleech extraction failed: ${e.message}")
+                    }
                 }
                 source.contains("gdflix", ignoreCase = true) -> {
-                    loadExtractor(source, "", subtitleCallback, callback)
+                    try {
+                        loadExtractor(source, "", subtitleCallback, callback)
+                    } catch (e: Exception) {
+                        Log.d("Error", "gdflix extraction failed: ${e.message}")
+                    }
                 }
                 source.contains("vcloud", ignoreCase = true) -> {
-                    loadExtractor(source, "", subtitleCallback, callback)
+                    try {
+                        loadExtractor(source, "", subtitleCallback, callback)
+                    } catch (e: Exception) {
+                        Log.d("Error", "vcloud extraction failed: ${e.message}")
+                    }
                 }
                 source.contains("hubcloud", ignoreCase = true) -> {
-                    loadExtractor(source, "", subtitleCallback, callback)
+                    try {
+                        loadExtractor(source, "", subtitleCallback, callback)
+                    } catch (e: Exception) {
+                        Log.d("Error", "hubcloud extraction failed: ${e.message}")
+                    }
                 }
                 source.contains("drivefire", ignoreCase = true) -> {
-                    loadExtractor(source, "", subtitleCallback, callback)
+                    try {
+                        loadExtractor(source, "", subtitleCallback, callback)
+                    } catch (e: Exception) {
+                        Log.d("Error", "drivefire extraction failed: ${e.message}")
+                    }
                 }
                 source.contains("fastdrive", ignoreCase = true) -> {
-                    loadExtractor(source, "", subtitleCallback, callback)
+                    try {
+                        loadExtractor(source, "", subtitleCallback, callback)
+                    } catch (e: Exception) {
+                        Log.d("Error", "fastdrive extraction failed: ${e.message}")
+                    }
                 }
                 source.contains("drivehub", ignoreCase = true) -> {
-                    loadExtractor(source, "", subtitleCallback, callback)
+                    try {
+                        loadExtractor(source, "", subtitleCallback, callback)
+                    } catch (e: Exception) {
+                        Log.d("Error", "drivehub extraction failed: ${e.message}")
+                    }
                 }
                 else -> {
-                    loadExtractor(source, "", subtitleCallback, callback)
+                    try {
+                        loadExtractor(source, "", subtitleCallback, callback)
+                    } catch (e: Exception) {
+                        Log.d("Error", "Generic extraction failed: ${e.message}")
+                    }
                 }
             }
         }
