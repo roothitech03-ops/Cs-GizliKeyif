@@ -24,6 +24,8 @@ open class MoviesmodProvider : MainAPI() {
     override val hasDownloadSupport = true
     val cinemeta_url = "https://aiometadata.elfhosted.com/stremio/9197a4a9-2f5b-4911-845e-8704c520bdf7/meta"
     private val cfKiller by lazy { CloudflareKiller() }
+    private val streamExtractor = StreamExtractor()
+    
     override val supportedTypes = setOf(
         TvType.Movie,
         TvType.TvSeries,
@@ -239,24 +241,19 @@ open class MoviesmodProvider : MainAPI() {
         } else {
             val data = mutableListOf<EpisodeLink>()
 
-            // First try: maxbutton-download-links
-            document.select("a.maxbutton-download-links").mapNotNull {
+            // Strategy 1: maxbutton-download-links
+            document.select("a.maxbutton-download-links").forEach {
                 var link = it.attr("href")
                 if (link.contains("url=")) {
                     val base64Value = link.substringAfter("url=")
                     link = base64Decode(base64Value)
                 }
-
-                try {
-                    val doc = app.get(link, interceptor = cfKiller).document
-                    val source = doc.select("a.maxbutton-1, a.maxbutton-5").attr("href")
-                    if (source.isNotEmpty()) EpisodeLink(source) else null
-                } catch (e: Exception) {
-                    null
+                if (link.isNotBlank()) {
+                    data.add(EpisodeLink(link))
                 }
-            }.forEach { data.add(it) }
+            }
 
-            // Second try: episodes.modpro.blog
+            // Strategy 2: episodes.modpro.blog links
             if (data.isEmpty()) {
                 document.select("a.maxbutton").forEach { button ->
                     val buttonHref = button.attr("href")
@@ -270,13 +267,13 @@ open class MoviesmodProvider : MainAPI() {
                                 }
                             }
                         } catch (e: Exception) {
-                            Log.d("Error:", "Failed to load episode links: ${e.message}")
+                            Log.d("Moviesmod", "Error loading episode links: ${e.message}")
                         }
                     }
                 }
             }
 
-            // Third try: direct links on page
+            // Strategy 3: Direct page links
             if (data.isEmpty()) {
                 document.select("a[href*=unblockedgames], a[href*=driveseed], a[href*=driveleech], a[href*=gdflix], a[href*=vcloud], a[href*=hubcloud], a[href*=drivefire], a[href*=fastdrive], a[href*=drivehub]").forEach {
                     val href = it.attr("href")
@@ -308,75 +305,69 @@ open class MoviesmodProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val sources = parseJson<ArrayList<EpisodeLink>>(data)
-        sources.amap {
-            var source = it.source
+        
+        sources.amap { episodeLink ->
+            var source = episodeLink.source
             
-            when {
-                source.contains("unblockedgames", ignoreCase = true) -> {
+            try {
+                // For unblockedgames: Use advanced extraction
+                if (source.contains("unblockedgames", ignoreCase = true)) {
                     try {
-                        loadExtractor(source, "", subtitleCallback, callback)
+                        val extractedLinks = streamExtractor.extractUnblockedGames(source)
+                        extractedLinks.forEach { link ->
+                            try {
+                                loadExtractor(link, "", subtitleCallback, callback)
+                            } catch (e: Exception) {
+                                Log.d("Moviesmod", "Extractor failed for: $link - ${e.message}")
+                            }
+                        }
                     } catch (e: Exception) {
-                        Log.d("Error", "unblockedgames extraction failed: ${e.message}")
+                        Log.d("Moviesmod", "unblockedgames extraction error: ${e.message}")
+                        // Fallback: Try direct extraction
+                        try {
+                            loadExtractor(source, "", subtitleCallback, callback)
+                        } catch (ex: Exception) {
+                            Log.d("Moviesmod", "Fallback extraction failed")
+                        }
                     }
                 }
-                source.contains("driveseed", ignoreCase = true) || source.contains("driveleech", ignoreCase = true) -> {
+                // For drive pages: Use multiple extraction methods
+                else if (source.contains("drive", ignoreCase = true) || 
+                         source.contains("driveleech", ignoreCase = true) ||
+                         source.contains("driveseed", ignoreCase = true)) {
                     try {
+                        // First try: Driveleech class
                         Driveleech().getUrl(source, "", subtitleCallback, callback)
                     } catch (e: Exception) {
-                        Log.d("Error", "Driveleech extraction failed: ${e.message}")
+                        Log.d("Moviesmod", "Driveleech failed: ${e.message}")
+                        // Second try: Drive page extraction
+                        try {
+                            val extractedLinks = streamExtractor.extractFromDrivePage(source)
+                            extractedLinks.forEach { link ->
+                                try {
+                                    loadExtractor(link, "", subtitleCallback, callback)
+                                } catch (ex: Exception) {
+                                    Log.d("Moviesmod", "Extractor failed for drive link")
+                                }
+                            }
+                        } catch (ex: Exception) {
+                            Log.d("Moviesmod", "Drive page extraction failed")
+                        }
                     }
                 }
-                source.contains("gdflix", ignoreCase = true) -> {
+                // For other sources: Direct extraction
+                else {
                     try {
                         loadExtractor(source, "", subtitleCallback, callback)
                     } catch (e: Exception) {
-                        Log.d("Error", "gdflix extraction failed: ${e.message}")
+                        Log.d("Moviesmod", "Generic extraction failed for: $source - ${e.message}")
                     }
                 }
-                source.contains("vcloud", ignoreCase = true) -> {
-                    try {
-                        loadExtractor(source, "", subtitleCallback, callback)
-                    } catch (e: Exception) {
-                        Log.d("Error", "vcloud extraction failed: ${e.message}")
-                    }
-                }
-                source.contains("hubcloud", ignoreCase = true) -> {
-                    try {
-                        loadExtractor(source, "", subtitleCallback, callback)
-                    } catch (e: Exception) {
-                        Log.d("Error", "hubcloud extraction failed: ${e.message}")
-                    }
-                }
-                source.contains("drivefire", ignoreCase = true) -> {
-                    try {
-                        loadExtractor(source, "", subtitleCallback, callback)
-                    } catch (e: Exception) {
-                        Log.d("Error", "drivefire extraction failed: ${e.message}")
-                    }
-                }
-                source.contains("fastdrive", ignoreCase = true) -> {
-                    try {
-                        loadExtractor(source, "", subtitleCallback, callback)
-                    } catch (e: Exception) {
-                        Log.d("Error", "fastdrive extraction failed: ${e.message}")
-                    }
-                }
-                source.contains("drivehub", ignoreCase = true) -> {
-                    try {
-                        loadExtractor(source, "", subtitleCallback, callback)
-                    } catch (e: Exception) {
-                        Log.d("Error", "drivehub extraction failed: ${e.message}")
-                    }
-                }
-                else -> {
-                    try {
-                        loadExtractor(source, "", subtitleCallback, callback)
-                    } catch (e: Exception) {
-                        Log.d("Error", "Generic extraction failed: ${e.message}")
-                    }
-                }
+            } catch (e: Exception) {
+                Log.d("Moviesmod", "Error processing link: ${e.message}")
             }
         }
+        
         return true
     }
 
