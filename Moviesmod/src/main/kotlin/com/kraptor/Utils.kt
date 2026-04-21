@@ -38,7 +38,7 @@ open class Driveleech : ExtractorApi() {
         return link
     }
 
-    private suspend fun resumeBot(url : String): String {
+    private suspend fun resumeBot(url: String): String {
         val resumeBotResponse = app.get(url)
         val resumeBotDoc = resumeBotResponse.document.toString()
         val ssid = resumeBotResponse.cookies["PHPSESSID"]
@@ -49,7 +49,8 @@ open class Driveleech : ExtractorApi() {
             .addEncoded("token", "$resumeBotToken")
             .build()
 
-        val jsonResponse = app.post(resumeBotBaseUrl + "/download?id=" + resumeBotPath,
+        val jsonResponse = app.post(
+            resumeBotBaseUrl + "/download?id=" + resumeBotPath,
             requestBody = requestBody,
             headers = mapOf(
                 "Accept" to "*/*",
@@ -77,84 +78,82 @@ open class Driveleech : ExtractorApi() {
     ) {
         try {
             val baseUrl = getBaseUrl(url)
-            val document = if(url.contains("r?key=")) {
+            val document = if (url.contains("r?key=")) {
                 val temp = app.get(url).document.selectFirst("script")?.data()?.substringAfter("replace(\"")?.substringBefore("\")") ?: ""
                 app.get(baseUrl + temp).document
-            }
-            else {
+            } else {
                 app.get(url).document
             }
 
-        val fileName = document.select("ul > li.list-group-item:contains(Name)").text().substringAfter("Name : ")
-        val fileSize = document.select("ul > li.list-group-item:contains(Size)").text().substringAfter("Size : ")
-        val quality = getIndexQuality(fileName)
+            val fileName = document.select("ul > li.list-group-item:contains(Name)").text().substringAfter("Name : ")
+            val fileSize = document.select("ul > li.list-group-item:contains(Size)").text().substringAfter("Size : ")
+            val quality = getIndexQuality(fileName)
 
-        suspend fun myCallback(link: String, server: String = "") {
-            callback.invoke(
-                newExtractorLink(
-                    "${name}${server}",
-                    "${name}${server} ${fileName}[${fileSize}]",
-                    link,
-                    ExtractorLinkType.VIDEO
-                ) {
-                    this.quality = quality
-                }
-            )
-        }
-
-        document.select("div.text-center > a").amap { element ->
-            val text = element.text()
-            val href = element.attr("href")
-            when {
-                text.contains("Cloud Download") -> { myCallback(href, "[Cloud]") }
-                text.contains("Instant Download") -> {
-                    try{
-                        val instant = instantLink(href) ?: return@amap
-                        myCallback(instant, "[Instant(Download)]")
-                    } catch (e: Exception) {
-                        Log.d("Error:", e.toString())
+            suspend fun myCallback(link: String, server: String = "") {
+                callback.invoke(
+                    newExtractorLink(
+                        "${name}${server}",
+                        "${name}${server} ${fileName}[${fileSize}]",
+                        link,
+                        ExtractorLinkType.VIDEO
+                    ) {
+                        this.quality = quality
                     }
-                }
-                text.contains("Resume Worker Bot") -> {
-                    try{
-                        val resumeLink = resumeBot(href)
-                        myCallback(resumeLink, "[ResumeBot]")
-                    } catch (e: Exception) {
-                        Log.d("Error:", e.toString())
-                    }
+                )
+            }
 
-                }
-                text.contains("Direct Links") -> {
-                    try {
-                        val link = baseUrl + href
-                        CFType(link).forEach {
-                            myCallback(it, "[CF]")
+            document.select("div.text-center > a").amap { element ->
+                val text = element.text()
+                val href = element.attr("href")
+                when {
+                    text.contains("Cloud Download") -> {
+                        myCallback(href, "[Cloud]")
+                    }
+                    text.contains("Instant Download") -> {
+                        try {
+                            val instant = instantLink(href) ?: return@amap
+                            myCallback(instant, "[Instant(Download)]")
+                        } catch (e: Exception) {
+                            Log.d("Error:", e.toString())
                         }
-                    } catch (e: Exception) {
-                        Log.d("Error:", e.toString())
                     }
-                }
-                text.contains("Resume Cloud") -> {
-                    try {
-                        val resumeCloud = resumeCloudLink(baseUrl, href) ?: return@amap
-                        myCallback(resumeCloud, "[ResumeCloud]")
-                    } catch (e: Exception) {
-                        Log.d("Error:", e.toString())
+                    text.contains("Resume Worker Bot") -> {
+                        try {
+                            val resumeLink = resumeBot(href)
+                            myCallback(resumeLink, "[ResumeBot]")
+                        } catch (e: Exception) {
+                            Log.d("Error:", e.toString())
+                        }
                     }
-                }
-
-                text.contains("gofile") -> {
-                    loadExtractor(href, "", subtitleCallback, callback)
-                }
-                else -> {
-                    Log.d("Error", "No Server matched")
+                    text.contains("Direct Links") -> {
+                        try {
+                            val link = baseUrl + href
+                            CFType(link).forEach {
+                                myCallback(it, "[CF]")
+                            }
+                        } catch (e: Exception) {
+                            Log.d("Error:", e.toString())
+                        }
+                    }
+                    text.contains("Resume Cloud") -> {
+                        try {
+                            val resumeCloud = resumeCloudLink(baseUrl, href) ?: return@amap
+                            myCallback(resumeCloud, "[ResumeCloud]")
+                        } catch (e: Exception) {
+                            Log.d("Error:", e.toString())
+                        }
+                    }
+                    text.contains("gofile") -> {
+                        loadExtractor(href, "", subtitleCallback, callback)
+                    }
+                    else -> {
+                        Log.d("Error", "No Server matched")
+                    }
                 }
             }
-        }
         } catch (e: Exception) {
             Log.d("ExtractorError", "Failed to extract: ${e.message}")
         }
-    }
     }
 }
 
