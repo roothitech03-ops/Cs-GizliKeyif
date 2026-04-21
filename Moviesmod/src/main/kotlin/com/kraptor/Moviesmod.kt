@@ -80,6 +80,8 @@ open class MoviesmodProvider : MainAPI() {
         val href = this.select("a").attr("href")
         val posterUrl = this.select("a > div > img").attr("src")
 
+        if (title.isEmpty() || href.isEmpty()) return null
+
         return newMovieSearchResponse(title, href, TvType.Movie) {
             this.posterUrl = posterUrl
         }
@@ -184,7 +186,8 @@ open class MoviesmodProvider : MainAPI() {
                                 val hTags = doc.select("h3,h4")
                                 var e = 1
                                 hTags.forEach { hTag ->
-                                    val epUrl = hTag.select("a").attr("href").takeIf { it.isNotBlank() } ?: return@forEach
+                                    val epLink = hTag.select("a").first()
+                                    val epUrl = epLink?.attr("href")?.takeIf { it.isNotBlank() } ?: return@forEach
                                     val key = Pair(realSeason, e)
                                     episodesMap.compute(key) { _, current ->
                                         (current ?: mutableListOf()).apply { add(epUrl) }
@@ -237,21 +240,49 @@ open class MoviesmodProvider : MainAPI() {
             } else null
         }
         else {
-            val data = document.select("a.maxbutton-download-links").mapNotNull {
+            val data = mutableListOf<EpisodeLink>()
+            
+            // پہلے maxbutton-download-links سے
+            document.select("a.maxbutton-download-links").mapNotNull {
                 var link = it.attr("href")
                 if(link.contains("url=")) {
                     val base64Value = link.substringAfter("url=")
                     link = base64Decode(base64Value)
                 }
 
-                val doc = app.get(link, interceptor = cfKiller).document
-                val source = doc.select("a.maxbutton-1, a.maxbutton-5").attr("href")
-                if(source.isNotEmpty()) EpisodeLink(source) else null
-            }.toMutableList()
+                try {
+                    val doc = app.get(link, interceptor = cfKiller).document
+                    val source = doc.select("a.maxbutton-1, a.maxbutton-5").attr("href")
+                    if(source.isNotEmpty()) EpisodeLink(source) else null
+                } catch (e: Exception) {
+                    null
+                }
+            }.forEach { data.add(it) }
 
-            // Also try other download button types
+            // اگر کوئی نہیں ملے تو episodes page سے links لیں
             if(data.isEmpty()) {
-                document.select("a[href*=unblockedgames], a[href*=driveseed], a[href*=driveleech]").forEach {
+                document.select("a.maxbutton").forEach { button ->
+                    val buttonHref = button.attr("href")
+                    if(buttonHref.isNotBlank() && buttonHref.contains("episodes.modpro.blog")) {
+                        try {
+                            val episodeDoc = app.get(buttonHref, interceptor = cfKiller).document
+                            // episodes page سے تمام download links نکالیں
+                            episodeDoc.select("a[href*=unblockedgames], a[href*=driveseed], a[href*=driveleech], a[href*=gdflix], a[href*=vcloud], a[href*=hubcloud], a[href*=drivefire], a[href*=fastdrive], a[href*=drivehub]").forEach {
+                                val href = it.attr("href")
+                                if(href.isNotBlank()) {
+                                    data.add(EpisodeLink(href))
+                                }
+                            }
+                        } catch (e: Exception) {
+                            Log.d("Error:", "Failed to load episode links: ${e.message}")
+                        }
+                    }
+                }
+            }
+
+            // اگر abھی بھی نہیں ملے تو direct links
+            if(data.isEmpty()) {
+                document.select("a[href*=unblockedgames], a[href*=driveseed], a[href*=driveleech], a[href*=gdflix], a[href*=vcloud], a[href*=hubcloud], a[href*=drivefire], a[href*=fastdrive], a[href*=drivehub]").forEach {
                     val href = it.attr("href")
                     if(href.isNotBlank()) {
                         data.add(EpisodeLink(href))
