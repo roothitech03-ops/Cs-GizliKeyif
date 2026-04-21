@@ -1,4 +1,4 @@
-package com.Cs_GizliKeyif
+package com.kraptor
 
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.utils.ExtractorApi
