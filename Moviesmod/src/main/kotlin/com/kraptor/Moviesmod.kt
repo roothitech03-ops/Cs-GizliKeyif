@@ -247,7 +247,7 @@ open class MoviesmodProvider : MainAPI() {
                 val doc = app.get(link, interceptor = cfKiller).document
                 val source = doc.select("a.maxbutton-1, a.maxbutton-5").attr("href")
                 if(source.isNotEmpty()) EpisodeLink(source) else null
-            }
+            }.toMutableList()
 
             // Also try other download button types
             if(data.isEmpty()) {
