@@ -9,11 +9,6 @@ import com.lagradost.api.Log
 import org.json.JSONObject
 import com.lagradost.cloudstream3.network.CloudflareKiller
 
-class Driveseed : Driveleech() {
-    override val name: String = "Driveseed"
-    override val mainUrl: String = "https://driveseed.*"
-}
-
 open class Driveleech : ExtractorApi() {
     override val name: String = "Driveleech"
     override val mainUrl: String = "https://driveleech.*"
@@ -155,6 +150,11 @@ open class Driveleech : ExtractorApi() {
             Log.d("ExtractorError", "Failed to extract: ${e.message}")
         }
     }
+}
+
+class Driveseed : Driveleech() {
+    override val name: String = "Driveseed"
+    override val mainUrl: String = "https://driveseed.*"
 }
 
 fun fixUrl(url: String, domain: String): String {
