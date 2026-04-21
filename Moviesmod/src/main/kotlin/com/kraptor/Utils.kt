@@ -75,14 +75,15 @@ open class Driveleech : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        val baseUrl = getBaseUrl(url)
-        val document = if(url.contains("r?key=")) {
-            val temp = app.get(url).document.selectFirst("script")?.data()?.substringAfter("replace(\"")?.substringBefore("\")") ?: ""
-            app.get(baseUrl + temp).document
-        }
-        else {
-            app.get(url).document
-        }
+        try {
+            val baseUrl = getBaseUrl(url)
+            val document = if(url.contains("r?key=")) {
+                val temp = app.get(url).document.selectFirst("script")?.data()?.substringAfter("replace(\"")?.substringBefore("\")") ?: ""
+                app.get(baseUrl + temp).document
+            }
+            else {
+                app.get(url).document
+            }
 
         val fileName = document.select("ul > li.list-group-item:contains(Name)").text().substringAfter("Name : ")
         val fileSize = document.select("ul > li.list-group-item:contains(Size)").text().substringAfter("Size : ")
@@ -150,6 +151,10 @@ open class Driveleech : ExtractorApi() {
                 }
             }
         }
+        } catch (e: Exception) {
+            Log.d("ExtractorError", "Failed to extract: ${e.message}")
+        }
+    }
     }
 }
 
