@@ -1,12 +1,8 @@
-version = 5
-
+version = 31
 
 cloudstream {
-    language = "hi"
-    // All of these properties are optional, you can safely remove them
-
-    description = "Anime/Cartoon in Hindi"
-    authors = listOf("kraptor")
+    description = "Moviesmod.farm - Movies, Web Series, TV Shows & Anime"
+    authors = listOf("Moviesmod")
 
     /**
      * Status int as the following:
@@ -15,15 +11,13 @@ cloudstream {
      * 2: Slow
      * 3: Beta only
      * */
-    status = 1 // will be 3 if unspecified
+    status = 1
     tvTypes = listOf(
-        "AnimeMovie",
-        "Anime",
-        "Cartoon"
+        "TvSeries",
+        "Movie",
+        "AsianDrama",
+        "Anime"
     )
 
-    iconUrl= "https://watchanimeworld.net/wp-content/uploads/cropped-AW_Smiley-192x192.png"
-
-
-    isCrossPlatform = true
+    iconUrl = "https://raw.githubusercontent.com/recloudstream/cloudstream/master/app/src/main/res/drawable/cloud_bolt.png"
 }
