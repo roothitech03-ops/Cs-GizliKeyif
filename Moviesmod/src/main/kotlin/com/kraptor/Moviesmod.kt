@@ -4,7 +4,6 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.network.CloudflareKiller
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.nodes.Element
-import org.jsoup.select.Elements
 import com.lagradost.cloudstream3.base64Decode
 import com.lagradost.cloudstream3.LoadResponse.Companion.addImdbUrl
 import com.lagradost.cloudstream3.LoadResponse.Companion.addActors
@@ -69,7 +68,7 @@ open class MoviesmodProvider : MainAPI() {
         request: MainPageRequest
     ): HomePageResponse {
         val document = app.get(mainUrl + request.data + page, interceptor = cfKiller).document
-        val home = document.select("div.post-cards > article").mapNotNull {
+        val home = document.select("article").mapNotNull {
             it.toSearchResult()
         }
         return newHomePageResponse(request.name, home)
@@ -88,8 +87,8 @@ open class MoviesmodProvider : MainAPI() {
     }
 
     override suspend fun search(query: String, page: Int): SearchResponseList? {
-        val document = app.get("$mainUrl/?s=$query" + if(page > 1) "/page/$page" else "", interceptor = cfKiller).document
-        val results = document.select("div.post-cards > article").mapNotNull { it.toSearchResult() }
+        val document = app.get("$mainUrl/?s=$query" + if (page > 1) "/page/$page" else "", interceptor = cfKiller).document
+        val results = document.select("article").mapNotNull { it.toSearchResult() }
         val hasNext = results.isNotEmpty()
         return newSearchResponseList(results, hasNext)
     }
@@ -115,7 +114,7 @@ open class MoviesmodProvider : MainAPI() {
             try {
                 val jsonResponse = app.get("$cinemeta_url/$tvtype/$imdbId.json").text
                 val responseData = tryParseJson<ResponseData>(jsonResponse)
-                if(responseData != null) {
+                if (responseData != null) {
                     description = responseData.meta.description ?: description
                     cast = responseData.meta.cast ?: emptyList()
                     title = responseData.meta.name ?: title
@@ -126,21 +125,20 @@ open class MoviesmodProvider : MainAPI() {
                     background = responseData.meta.background ?: background
                 }
             } catch (e: Exception) {
-                // Fallback
-                if(description.isEmpty()) {
+                if (description.isEmpty()) {
                     description = document.select("div.thecontent p").firstOrNull()?.text() ?: ""
                 }
                 val genreText = document.select("a[rel=category tag]").map { it.text() }
-                if(genreText.isNotEmpty()) genre = genreText
+                if (genreText.isNotEmpty()) genre = genreText
             }
         }
 
-        if(tvtype == "series") {
-            if(title != ogTitle) {
+        if (tvtype == "series") {
+            if (title != ogTitle) {
                 val checkSeason = Regex("""Season\s*\d*1|S\s*\d*1""").find(ogTitle)
                 if (checkSeason == null) {
                     val seasonText = Regex("""Season\s*\d+|S\s*\d+""").find(ogTitle)?.value
-                    if(seasonText != null) {
+                    if (seasonText != null) {
                         title = title + " " + seasonText
                     }
                 }
@@ -169,7 +167,6 @@ open class MoviesmodProvider : MainAPI() {
 
                             val doc = app.get(link, interceptor = cfKiller).document
 
-                            // Try new structure first (episode links page)
                             val episodeLinks = doc.select("a[href*=unblockedgames], a[href*=driveseed], a[href*=driveleech], a[href*=gdflix], a[href*=vcloud], a[href*=hubcloud], a[href*=drivefire], a[href*=fastdrive], a[href*=drivehub]")
                             var epNum = 1
                             episodeLinks.forEach { epLink ->
@@ -181,8 +178,7 @@ open class MoviesmodProvider : MainAPI() {
                                 epNum++
                             }
 
-                            // Try h3/h4 structure (older format)
-                            if(episodeLinks.isEmpty()) {
+                            if (episodeLinks.isEmpty()) {
                                 val hTags = doc.select("h3,h4")
                                 var e = 1
                                 hTags.forEach { hTag ->
@@ -201,19 +197,21 @@ open class MoviesmodProvider : MainAPI() {
             }
 
             for ((key, value) in episodesMap.toSortedMap(compareBy({ it.first }, { it.second }))) {
-                val episodeInfo = if(imdbId.isNotEmpty()) {
+                val episodeInfo = if (imdbId.isNotEmpty()) {
                     try {
                         val jsonResponse = app.get("$cinemeta_url/$tvtype/$imdbId.json").text
                         val responseData = tryParseJson<ResponseData>(jsonResponse)
                         responseData?.meta?.videos?.find { it.season == key.first && it.episode == key.second }
-                    } catch (e: Exception) { null }
+                    } catch (e: Exception) {
+                        null
+                    }
                 } else null
 
                 val data = value.distinct().map { source ->
                     EpisodeLink(source)
                 }
 
-                if(data.isNotEmpty()) {
+                if (data.isNotEmpty()) {
                     tvSeriesEpisodes.add(
                         newEpisode(data) {
                             this.name = episodeInfo?.name ?: episodeInfo?.title ?: "Episode ${key.second}"
@@ -226,26 +224,24 @@ open class MoviesmodProvider : MainAPI() {
                 }
             }
 
-            return if(tvSeriesEpisodes.isNotEmpty()) {
+            return if (tvSeriesEpisodes.isNotEmpty()) {
                 newTvSeriesLoadResponse(title, url, TvType.TvSeries, tvSeriesEpisodes.sortedWith(compareBy({ it.season }, { it.episode }))) {
                     this.posterUrl = posterUrl
                     this.plot = description
                     this.tags = genre
-                    this.score = if(imdbRating.isNotEmpty()) Score.from10(imdbRating) else null
+                    this.score = if (imdbRating.isNotEmpty()) Score.from10(imdbRating) else null
                     this.year = year.toIntOrNull()
                     this.backgroundPosterUrl = background
                     addActors(cast)
-                    if(imdbUrl.isNotEmpty()) addImdbUrl(imdbUrl)
+                    if (imdbUrl.isNotEmpty()) addImdbUrl(imdbUrl)
                 }
             } else null
-        }
-        else {
+        } else {
             val data = mutableListOf<EpisodeLink>()
-            
-            // پہلے maxbutton-download-links سے
+
             document.select("a.maxbutton-download-links").mapNotNull {
                 var link = it.attr("href")
-                if(link.contains("url=")) {
+                if (link.contains("url=")) {
                     val base64Value = link.substringAfter("url=")
                     link = base64Decode(base64Value)
                 }
@@ -253,23 +249,21 @@ open class MoviesmodProvider : MainAPI() {
                 try {
                     val doc = app.get(link, interceptor = cfKiller).document
                     val source = doc.select("a.maxbutton-1, a.maxbutton-5").attr("href")
-                    if(source.isNotEmpty()) EpisodeLink(source) else null
+                    if (source.isNotEmpty()) EpisodeLink(source) else null
                 } catch (e: Exception) {
                     null
                 }
             }.forEach { data.add(it) }
 
-            // اگر کوئی نہیں ملے تو episodes page سے links لیں
-            if(data.isEmpty()) {
+            if (data.isEmpty()) {
                 document.select("a.maxbutton").forEach { button ->
                     val buttonHref = button.attr("href")
-                    if(buttonHref.isNotBlank() && buttonHref.contains("episodes.modpro.blog")) {
+                    if (buttonHref.isNotBlank() && buttonHref.contains("episodes.modpro.blog")) {
                         try {
                             val episodeDoc = app.get(buttonHref, interceptor = cfKiller).document
-                            // episodes page سے تمام download links نکالیں
                             episodeDoc.select("a[href*=unblockedgames], a[href*=driveseed], a[href*=driveleech], a[href*=gdflix], a[href*=vcloud], a[href*=hubcloud], a[href*=drivefire], a[href*=fastdrive], a[href*=drivehub]").forEach {
                                 val href = it.attr("href")
-                                if(href.isNotBlank()) {
+                                if (href.isNotBlank()) {
                                     data.add(EpisodeLink(href))
                                 }
                             }
@@ -280,26 +274,25 @@ open class MoviesmodProvider : MainAPI() {
                 }
             }
 
-            // اگر abھی بھی نہیں ملے تو direct links
-            if(data.isEmpty()) {
+            if (data.isEmpty()) {
                 document.select("a[href*=unblockedgames], a[href*=driveseed], a[href*=driveleech], a[href*=gdflix], a[href*=vcloud], a[href*=hubcloud], a[href*=drivefire], a[href*=fastdrive], a[href*=drivehub]").forEach {
                     val href = it.attr("href")
-                    if(href.isNotBlank()) {
+                    if (href.isNotBlank()) {
                         data.add(EpisodeLink(href))
                     }
                 }
             }
 
-            return if(data.isNotEmpty()) {
+            return if (data.isNotEmpty()) {
                 newMovieLoadResponse(title, url, TvType.Movie, data.distinctBy { it.source }) {
                     this.posterUrl = posterUrl
                     this.plot = description
                     this.tags = genre
-                    this.score = if(imdbRating.isNotEmpty()) Score.from10(imdbRating) else null
+                    this.score = if (imdbRating.isNotEmpty()) Score.from10(imdbRating) else null
                     this.year = year.toIntOrNull()
                     this.backgroundPosterUrl = background
                     addActors(cast)
-                    if(imdbUrl.isNotEmpty()) addImdbUrl(imdbUrl)
+                    if (imdbUrl.isNotEmpty()) addImdbUrl(imdbUrl)
                 }
             } else null
         }
@@ -314,7 +307,7 @@ open class MoviesmodProvider : MainAPI() {
         val sources = parseJson<ArrayList<EpisodeLink>>(data)
         sources.amap {
             var source = it.source
-            if(source.contains("unblockedgames", ignoreCase = true)) {
+            if (source.contains("unblockedgames", ignoreCase = true)) {
                 source = bypass(source) ?: source
             }
 
