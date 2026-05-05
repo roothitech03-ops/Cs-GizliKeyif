@@ -1,9 +1,9 @@
 // use an integer for version numbers
-version = 1
+version = 2
 
 cloudstream {
     language = "hi"
-    description = "Watch Anime & Cartoons in Hindi, Tamil, Telugu, English, Japanese Multi Audio from ToonWorld4All.me"
+    description = "Watch Anime, Cartoons & Hindi Dubbed series from RareAnimes (Rare Toons India)"
     authors = listOf("kraptor")
 
     /**
@@ -18,7 +18,8 @@ cloudstream {
         "Anime",
         "AnimeMovie",
         "Cartoon",
+        "OVA",
     )
 
-    iconUrl = "https://toonworld4all.me/wp-content/uploads/2023/01/cropped-toonworld4all-1-192x192.png"
+    iconUrl = "https://india.rareanimes.com/wp-content/uploads/2020/05/cropped-Logo-1-192x192.png"
 }
