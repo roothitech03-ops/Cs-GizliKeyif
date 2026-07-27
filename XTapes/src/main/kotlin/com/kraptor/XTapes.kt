@@ -7,7 +7,7 @@ import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.LoadResponse.Companion.addActors
 
 class XTapes : MainAPI() {
-    override var mainUrl              = "https://xtapes.tw"
+    override var mainUrl              = "https://en.xtapes.tw"
     override var name                 = "XTapes"
     override val hasMainPage          = true
     override var lang                 = "en"
@@ -21,11 +21,11 @@ class XTapes : MainAPI() {
         "${mainUrl}/?filtre=rate" to "Top Rated",
         "${mainUrl}/?filtre=date&cat=1766" to "Full Movies",
         "${mainUrl}/4k-porn-104363/" to "4K",
-        "${mainUrl}/721584/" to "Anal",
+        "${mainUrl}/796584/" to "Anal",
         "${mainUrl}/761395/" to "Asian",
-        "${mainUrl}/236413/" to "Big Tits",
+        "${mainUrl}/792684/" to "Big Tits",
         "${mainUrl}/blowjob-oral-cok-sucking-pussy-licking-45105/" to "Blowjob",
-        "${mainUrl}/creampie-cum-inside-356185/" to "Creampie",
+        "${mainUrl}/creampie-cum-inside-352895/" to "Creampie",
         "${mainUrl}/lesbian-porn-videos-047434/" to "Lesbian",
         "${mainUrl}/milf-mom-hd-porn-438706/" to "MILFs",
         "${mainUrl}/hd-teen-porn-videos-126957/" to "Teen",
