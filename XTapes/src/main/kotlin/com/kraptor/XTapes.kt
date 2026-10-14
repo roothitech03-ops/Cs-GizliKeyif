@@ -58,11 +58,29 @@ class XTapes : MainAPI() {
         }
 
         val document = app.get(url, headers = browserHeaders).document
-        val home = document.select("ul.listing-tube li, ul.listing-videos li")
-            .mapNotNull { it.toSearchResult() }
+        val blockedByChallenge = document.isSecurityChallenge()
+        if (blockedByChallenge) {
+            Log.e("XTapes", "Cloudflare security challenge blocked video listing: $url")
+        }
+        val home = if (blockedByChallenge) emptyList() else {
+            document.select("ul.listing-tube li, ul.listing-videos li")
+                .mapNotNull { it.toSearchResult() }
+        }
         Log.d("XTapes", "Loaded ${home.size} video cards from $url")
-        return newHomePageResponse(request.name, home, hasNext = document.hasNextPage())
+        return newHomePageResponse(
+            list = HomePageList(
+                name = request.name,
+                list = home,
+                isHorizontalImages = true
+            ),
+            hasNext = home.isNotEmpty() && document.hasNextPage()
+        )
     }
+
+    private fun Document.isSecurityChallenge(): Boolean =
+        title().contains("just a moment", ignoreCase = true) ||
+            text().contains("verify you are human", ignoreCase = true) ||
+            selectFirst("iframe[src*='challenges.cloudflare.com'], #challenge-form, #cf-challenge-running") != null
 
     private fun Document.hasNextPage(): Boolean = select("a[href]").any { anchor ->
         val rel = anchor.attr("rel").split(Regex("\\s+")).any { it.equals("next", ignoreCase = true) }
@@ -98,6 +116,10 @@ class XTapes : MainAPI() {
     override suspend fun search(query: String): List<SearchResponse> {
         val encodedQuery = URLEncoder.encode(query, Charsets.UTF_8.name())
         val document = app.get("$mainUrl/?s=$encodedQuery", headers = browserHeaders).document
+        if (document.isSecurityChallenge()) {
+            Log.e("XTapes", "Cloudflare security challenge blocked search results")
+            return emptyList()
+        }
         return document.select("ul.listing-tube li, ul.listing-videos li")
             .mapNotNull { it.toSearchResult() }
     }
