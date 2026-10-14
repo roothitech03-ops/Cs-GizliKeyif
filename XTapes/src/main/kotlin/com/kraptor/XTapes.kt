@@ -287,7 +287,7 @@ class XTapes : MainAPI() {
         }
     }
 
-    private fun addHlsLink(
+    private suspend fun addHlsLink(
         label: String,
         rawUrl: String,
         embedUrl: String,
