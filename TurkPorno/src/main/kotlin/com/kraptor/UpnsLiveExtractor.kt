@@ -3,7 +3,7 @@ package com.kraptor
 import android.util.Log
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.extractors.AesHelper
-import com.lagradost.cloudstream3.utils.AppUtils.parseJson
+import com.google.gson.Gson
 import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
@@ -53,7 +53,7 @@ open class UpnsLiveExtractor() : ExtractorApi() {
             Log.d("kraptor_$name", "aesCoz = $aesCoz")
 
             // JSON parse et
-            val jsonData = parseJson<VideoResponse>(aesCoz)
+            val jsonData = Gson().fromJson(aesCoz, VideoResponse::class.java)
 
             if (jsonData?.title != null) {
                 // Video URL'sini oluştur: mainUrl + /djx/ + title

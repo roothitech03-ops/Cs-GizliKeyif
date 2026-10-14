@@ -13,7 +13,8 @@ import org.jsoup.nodes.Element
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.mvvm.logError
-import com.lagradost.cloudstream3.utils.AppUtils.parseJson
+import com.google.gson.Gson
+import com.google.gson.reflect.TypeToken
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
@@ -300,13 +301,16 @@ class ArabX(context: Context) : MainAPI() {
 
         Log.d("kraptor_Arabx", "Video JSON Result = $videoResultJson")
 
-            videoResultJson?.let { jsonResult ->
-                try {
-                    // JSON parse et
-                    val videoList = parseJson<List<VideoQuality>>(jsonResult)
+        videoResultJson?.let { jsonResult ->
+            try {
+                // JSON parse et
+                val videoList = Gson().fromJson<List<VideoQuality>>(
+                    jsonResult,
+                    object : TypeToken<List<VideoQuality>>() {}.type
+                )
 
-                    videoList?.forEach { video ->
-                        if (video.url.startsWith("http")) {
+                videoList?.forEach { video ->
+                    if (video.url.startsWith("http")) {
                         Log.d("kraptor_Arabx", "Adding: ${video.quality} - ${video.url}")
 
                             val videoUrl = app.get(video.url, referer = "${mainUrl}/", allowRedirects = true).url

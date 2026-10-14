@@ -14,7 +14,8 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.LoadResponse.Companion.addActors
 import com.lagradost.cloudstream3.LoadResponse.Companion.addTrailer
-import com.lagradost.cloudstream3.utils.AppUtils.parseJson
+import com.google.gson.Gson
+import com.google.gson.reflect.TypeToken
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
@@ -294,7 +295,10 @@ class VideoCelebs(context: Context) : MainAPI() {
         videoResultJson?.let { jsonResult ->
             try {
                 // JSON parse et
-                val videoList = parseJson<List<VideoQuality>>(jsonResult)
+                val videoList = Gson().fromJson<List<VideoQuality>>(
+                    jsonResult,
+                    object : TypeToken<List<VideoQuality>>() {}.type
+                )
 
                 videoList?.forEach { video ->
                     if (video.url.startsWith("http")) {
