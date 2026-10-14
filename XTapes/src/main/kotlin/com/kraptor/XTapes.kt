@@ -146,7 +146,8 @@ class XTapes : MainAPI() {
         ) return null
 
         val hasDetailMarker = document.selectFirst(
-            "video, iframe[src], iframe[data-src], [itemprop=contentUrl], [itemprop=thumbnailUrl], " +
+            "video, iframe[src], iframe[data-src], iframe[data-lazy-src], iframe[data-embed], iframe[data-iframe], " +
+                "iframe[data-url], iframe[data-player], [itemprop=contentUrl], [itemprop=thumbnailUrl], " +
                 "meta[property=og:video], meta[property=og:video:url], meta[property=og:image], " +
                 "meta[name=description], div.infotext, span[itemprop=description]"
         ) != null
@@ -208,15 +209,18 @@ class XTapes : MainAPI() {
             }
         }
 
-        // Sites commonly lazy-load embeds into data-src instead of src.
-        val iframeUrls = document.select("iframe[src], iframe[data-src], iframe[data-lazy-src]")
-            .mapNotNull { iframe ->
-                val src = sequenceOf("src", "data-src", "data-lazy-src")
-                    .map { iframe.attr(it).trim() }
-                    .firstOrNull { it.isNotBlank() && !it.equals("javascript:false", ignoreCase = true) }
-                src?.let { resolveUrl(pageUrl, it) }
-            }
-            .distinct()
+        // Resolve each attribute before choosing it: src="about:blank" must not mask a real lazy URL.
+        val iframeUrls = document.select(
+            "iframe[src], iframe[data-src], iframe[data-lazy-src], iframe[data-embed], " +
+                "iframe[data-iframe], iframe[data-url], iframe[data-player]"
+        ).mapNotNull { iframe ->
+            val iframeUrl = sequenceOf("src", "data-src", "data-lazy-src", "data-embed", "data-iframe", "data-url", "data-player")
+                .map { iframe.attr(it).trim() }
+                .filterNot { it.isBlank() || it.startsWith("javascript:", ignoreCase = true) }
+                .mapNotNull { resolveUrl(pageUrl, it) }
+                .firstOrNull()
+            iframeUrl?.takeUnless { iframe.isAdvertisementFrame() || isIgnoredIframe(it) }
+        }.distinct()
 
         // Some versions expose the player as a provider anchor, not an iframe.
         // Restrict this fallback to known player hosts to avoid following page ads/social links.
@@ -297,6 +301,14 @@ class XTapes : MainAPI() {
         if (!foundLink) Log.e("XTapes", "No playable links emitted from detail page; player candidates=${playerUrls.size}")
 
         return foundLink
+    }
+
+    private fun Element.isAdvertisementFrame(): Boolean {
+        val metadata = listOf(attr("title"), attr("aria-label"), attr("name"), attr("id"), attr("class")).joinToString(" ")
+        return Regex(
+            """(?:^|[\s_-])(?:ad|ads|advert|advertisement)(?:$|[\s_-])""",
+            RegexOption.IGNORE_CASE
+        ).containsMatchIn(metadata)
     }
 
     private fun isIgnoredIframe(url: String): Boolean = listOf(
