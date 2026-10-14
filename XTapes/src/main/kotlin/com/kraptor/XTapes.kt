@@ -1,80 +1,83 @@
 package com.kraptor
 
 import com.lagradost.api.Log
-import org.jsoup.nodes.Element
 import com.lagradost.cloudstream3.*
-import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.LoadResponse.Companion.addActors
+import com.lagradost.cloudstream3.utils.*
+import kotlinx.coroutines.CancellationException
+import org.jsoup.nodes.Document
+import org.jsoup.nodes.Element
+import java.net.URI
+import java.net.URLEncoder
 
 class XTapes : MainAPI() {
-    override var mainUrl              = "https://en.xtapes.tw"
-    override var name                 = "XTapes"
-    override val hasMainPage          = true
-    override var lang                 = "en"
-    override val hasQuickSearch       = false
-    override val supportedTypes       = setOf(TvType.NSFW)
-    override val vpnStatus            = VPNStatus.MightBeNeeded
+    // The site now serves its canonical pages from xtapes.la; the old .tw host redirects here.
+    override var mainUrl = "https://xtapes.la"
+    override var name = "XTapes"
+    override val hasMainPage = true
+    override var lang = "en"
+    override val hasQuickSearch = true
+    override val supportedTypes = setOf(TvType.NSFW)
+    override val vpnStatus = VPNStatus.MightBeNeeded
 
-    // The site rejects requests without a browser-like User-Agent (HTTP 403).
+    // The site rejects requests without browser-like headers (HTTP 403).
     private val browserHeaders = mapOf(
         "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
         "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language" to "en-US,en;q=0.9"
     )
 
+    // Entries are kept only where the current route was verified to resolve to that listing.
     override val mainPage = mainPageOf(
-        "${mainUrl}/?filtre=date&cat=0" to "Latest Videos",
-        "${mainUrl}/?filtre=views" to "Most Popular",
-        "${mainUrl}/?filtre=rate" to "Top Rated",
-        "${mainUrl}/?filtre=date&cat=1766" to "Full Movies",
-        "${mainUrl}/4k-porn-104363/" to "4K",
-        "${mainUrl}/796584/" to "Anal",
-        "${mainUrl}/761395/" to "Asian",
-        "${mainUrl}/792684/" to "Big Tits",
-        "${mainUrl}/blowjob-oral-cok-sucking-pussy-licking-45105/" to "Blowjob",
-        "${mainUrl}/creampie-cum-inside-352895/" to "Creampie",
-        "${mainUrl}/lesbian-porn-videos-047434/" to "Lesbian",
-        "${mainUrl}/milf-mom-hd-porn-438706/" to "MILFs",
-        "${mainUrl}/hd-teen-porn-videos-126957/" to "Teen",
-        "${mainUrl}/0647848/" to "Brazzers",
-        "${mainUrl}/476126/" to "BangBros",
-        "${mainUrl}/716908/" to "Reality Kings",
-        "${mainUrl}/584379/" to "Vixen",
-        "${mainUrl}/716908/" to "Blacked",
-        "${mainUrl}/495429/" to "Tushy",
+        "$mainUrl/?filtre=date&cat=0" to "Latest Videos",
+        "$mainUrl/?filtre=views" to "Most Popular",
+        "$mainUrl/?filtre=rate" to "Top Rated",
+        "$mainUrl/porn-movies-hd/?filtre=date" to "Full Movies",
+        "$mainUrl/4k-porn-104363/" to "4K",
+        "$mainUrl/796584/" to "Anal",
+        "$mainUrl/761395/" to "Asian",
+        "$mainUrl/792684/" to "Big Tits",
+        "$mainUrl/blowjob-oral-cok-sucking-pussy-licking-45105/" to "Blowjob",
+        "$mainUrl/creampie-cum-inside-352895/" to "Creampie",
+        "$mainUrl/lesbian-porn-videos-047434/" to "Lesbian",
+        "$mainUrl/0647848/" to "Brazzers",
+        "$mainUrl/476126/" to "BangBros",
+        "$mainUrl/716908/" to "Blacked",
+        "$mainUrl/584379/" to "MYLF",
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val url = if (page == 1) {
+        val url = if (page <= 1) {
             request.data
         } else {
             val baseUrl = request.data
-            if (baseUrl.contains("?")) {
-                val parts = baseUrl.split("?", limit = 2)
-                "${parts[0]}page/${page}/?${parts[1]}"
-            } else {
-                if (baseUrl.endsWith("/")) {
-                    "${baseUrl}page/${page}/"
-                } else {
-                    "${baseUrl}/page/${page}/"
-                }
-            }
+            val queryIndex = baseUrl.indexOf('?')
+            val path = if (queryIndex >= 0) baseUrl.substring(0, queryIndex) else baseUrl
+            val query = if (queryIndex >= 0) baseUrl.substring(queryIndex) else ""
+            "${path.trimEnd('/')}/page/$page/$query"
         }
+
         val document = app.get(url, headers = browserHeaders).document
         val home = document.select("ul.listing-tube li, ul.listing-videos li")
             .mapNotNull { it.toSearchResult() }
         Log.d("XTapes", "Loaded ${home.size} video cards from $url")
-        return newHomePageResponse(request.name, home, hasNext = home.isNotEmpty())
+        return newHomePageResponse(request.name, home, hasNext = document.hasNextPage())
+    }
+
+    private fun Document.hasNextPage(): Boolean = select("a[href]").any { anchor ->
+        val rel = anchor.attr("rel").split(Regex("\\s+")).any { it.equals("next", ignoreCase = true) }
+        val classes = anchor.classNames().any { it.equals("next", ignoreCase = true) }
+        rel || classes || anchor.text().contains("next videos", ignoreCase = true)
     }
 
     private fun Element.toSearchResult(): SearchResponse? {
-        val anchor = this.selectFirst("a[href][title]") ?: this.selectFirst("a[href]") ?: return null
-        val image = this.selectFirst("img")
+        val anchor = selectFirst("a[href][title]") ?: selectFirst("a[href]") ?: return null
+        val image = selectFirst("img")
         val title = listOfNotNull(
             anchor.attr("title").takeIf { it.isNotBlank() },
             image?.attr("alt")?.takeIf { it.isNotBlank() },
             image?.attr("title")?.takeIf { it.isNotBlank() },
-            this.selectFirst("h3")?.text()?.takeIf { it.isNotBlank() },
+            selectFirst("h3")?.text()?.takeIf { it.isNotBlank() },
             anchor.text().takeIf { it.isNotBlank() }
         ).firstOrNull() ?: return null
         val href = fixUrlNull(anchor.attr("href")) ?: return null
@@ -86,16 +89,15 @@ class XTapes : MainAPI() {
                 ?.substringBefore(",")
                 ?.substringBefore(" ")
         }
-        val posterUrl = fixUrlNull(posterCandidate)
+        val posterUrl = posterCandidate?.let { resolveUrl(mainUrl, it) }
         return newMovieSearchResponse(title.trim(), href, TvType.NSFW) {
             this.posterUrl = posterUrl
         }
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        val encodedQuery = java.net.URLEncoder.encode(query, "UTF-8")
-        val searchUrl = "${mainUrl}/?s=$encodedQuery"
-        val document = app.get(searchUrl, headers = browserHeaders).document
+        val encodedQuery = URLEncoder.encode(query, Charsets.UTF_8.name())
+        val document = app.get("$mainUrl/?s=$encodedQuery", headers = browserHeaders).document
         return document.select("ul.listing-tube li, ul.listing-videos li")
             .mapNotNull { it.toSearchResult() }
     }
@@ -103,55 +105,60 @@ class XTapes : MainAPI() {
     override suspend fun quickSearch(query: String): List<SearchResponse>? = search(query)
 
     override suspend fun load(url: String): LoadResponse? {
-        val document = app.get(url, headers = browserHeaders).document
-        val title = document.selectFirst("h1")?.text()?.trim() ?: return null
-        val poster = fixUrlNull(
-            document.selectFirst("meta[itemprop=thumbnailUrl]")?.attr("content")
-                ?: document.selectFirst("meta[property=og:image]")?.attr("content")
-        )
+        val pageUrl = resolveUrl(mainUrl, url) ?: return null
+        val document = app.get(pageUrl, headers = browserHeaders).document
+        val title = document.selectFirst("h1")?.text()?.trim()
+            ?.takeIf { it.isNotBlank() }
+            ?: document.selectFirst("meta[property=og:title]")?.attr("content")?.trim()
+                ?.takeIf { it.isNotBlank() }
+            ?: return null
+
+        // Listing and search pages also have h1 elements; do not expose them as playable movies.
+        if (title.startsWith("All videos in category", ignoreCase = true) ||
+            title.contains("Official Website", ignoreCase = true) ||
+            title.startsWith("Search results for", ignoreCase = true)
+        ) return null
+
+        val hasDetailMarker = document.selectFirst(
+            "video, iframe[src], iframe[data-src], [itemprop=contentUrl], [itemprop=thumbnailUrl], " +
+                "meta[property=og:video], meta[property=og:video:url], meta[property=og:image], " +
+                "meta[name=description], div.infotext, span[itemprop=description]"
+        ) != null
+        if (!hasDetailMarker) return null
+
+        val poster = listOfNotNull(
+            document.selectFirst("meta[itemprop=thumbnailUrl]")?.attr("content"),
+            document.selectFirst("meta[property=og:image]")?.attr("content"),
+            document.selectFirst("meta[name=twitter:image]")?.attr("content")
+        ).firstNotNullOfOrNull { resolveUrl(pageUrl, it) }
         val description = document.selectFirst("div.infotext")?.text()?.trim()
+            ?.takeIf { it.isNotBlank() }
             ?: document.selectFirst("span[itemprop=description]")?.attr("content")?.trim()
+                ?.takeIf { it.isNotBlank() }
             ?: document.selectFirst("meta[property=og:description]")?.attr("content")?.trim()
+                ?.takeIf { it.isNotBlank() }
+            ?: document.selectFirst("meta[name=description]")?.attr("content")?.trim()
+                ?.takeIf { it.isNotBlank() }
 
         val allTags = document.select("a[rel=tag]")
-        val tags = allTags.filter { !it.attr("href").contains("hd-porn-") }
+        val explicitActors = document.select("a[itemprop=actor], .actors a, .performers a, .performer a")
+        val actors = (if (explicitActors.isNotEmpty()) explicitActors else {
+            allTags.filter { it.attr("href").contains("hd-porn-", ignoreCase = true) }
+        }).map { Actor(it.text().trim(), null) }
+            .filter { it.name.isNotBlank() }
+            .distinctBy { it.name }
+        val tags = allTags
+            .filterNot { it.attr("href").contains("hd-porn-", ignoreCase = true) }
             .map { it.text().trim() }
             .filter { it.isNotEmpty() }
-        val actors = allTags.filter { it.attr("href").contains("hd-porn-") }
-            .map { Actor(it.text().trim(), null) }
+            .distinct()
 
-        return newMovieLoadResponse(title, url, TvType.NSFW, url) {
+        return newMovieLoadResponse(title, pageUrl, TvType.NSFW, pageUrl) {
             this.posterUrl = poster
             this.plot = description
             this.tags = tags
             addActors(actors)
         }
-    }
-
-    /**
-     * Simple JS Unpacker for eval(function(p,a,c,k,e,d){...}) packed scripts.
-     * This is a common JavaScript packer used by many video hosting sites.
-     */
-    private fun jsUnpack(packed: String): String? {
-        // Match eval(function(p,a,c,k,e,d){...}('PACKED',BASE,COUNT,'DICT'.split('|')))
-        // Using flexible regex to handle different backslash escaping variants
-        val regex = Regex(
-            """eval\(function\(p,a,c,k,e,d\)\{while\(c--\)if\(k\[c]\)p=p\.replace\(new RegExp\(.{3,30}c\.toString\(a\).{3,30},k\[c]\);return p\}\('([\s\S]*?)',(\d+),(\d+),'([\s\S]*?)'\.split\('\|'\)\)\)"""
-        )
-        val match = regex.find(packed) ?: return null
-
-        var p = match.groupValues[1]
-        val a = match.groupValues[2].toIntOrNull() ?: return null
-        var c = match.groupValues[3].toIntOrNull() ?: return null
-        val k = match.groupValues[4].split("|")
-
-        while (c-- > 0) {
-            if (c < k.size && k[c].isNotEmpty()) {
-                val word = Integer.toString(c, a)
-                p = p.replace(Regex("\\b${Regex.escape(word)}\\b"), k[c])
-            }
-        }
-        return p
     }
 
     override suspend fun loadLinks(
@@ -160,151 +167,158 @@ class XTapes : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val document = app.get(data, headers = browserHeaders).document
+        val pageUrl = resolveUrl(mainUrl, data) ?: return false
+        val document = app.get(pageUrl, headers = browserHeaders).document
         val pageHtml = document.html()
         var foundLink = false
+        val reportLink: (ExtractorLink) -> Unit = { link ->
+            if (link.url.isNotBlank()) {
+                foundLink = true
+                callback(link)
+            }
+        }
 
-        // ===== Method 1: Extract from 74k.io iframe (primary method) =====
-        val iframeSrcs = document.select("iframe[src]").map { it.attr("src") }
-        
-        // Find 74k.io iframe
-        val embed74k = iframeSrcs.firstOrNull { it.contains("74k.io") }
+        // Sites commonly lazy-load embeds into data-src instead of src.
+        val iframeUrls = document.select("iframe[src], iframe[data-src], iframe[data-lazy-src]")
+            .mapNotNull { iframe ->
+                val src = sequenceOf("src", "data-src", "data-lazy-src")
+                    .map { iframe.attr(it).trim() }
+                    .firstOrNull { it.isNotBlank() && !it.equals("javascript:false", ignoreCase = true) }
+                src?.let { resolveUrl(pageUrl, it) }
+            }
+            .distinct()
+
+        val embed74k = iframeUrls.firstOrNull { isHostOrSubdomain(it, "74k.io") }
         if (embed74k != null) {
             try {
-                val embedUrl = if (embed74k.startsWith("//")) "https:$embed74k"
-                               else if (!embed74k.startsWith("http")) "https://$embed74k"
-                               else embed74k
-                Log.d("XTapes", "Found 74k.io embed: $embedUrl")
-                
-                val embedResponse = app.get(
-                    embedUrl,
-                    referer = "$mainUrl/",
-                    headers = mapOf(
-                        "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-                    )
-                ).text
-
-                // Try to extract video links from the packed JS
-                val links = extract74kLinks(embedResponse, embedUrl)
+                Log.d("XTapes", "Found 74k.io embed: $embed74k")
+                val embedHtml = app.get(embed74k, referer = pageUrl, headers = browserHeaders).text
+                val links = extract74kLinks(embedHtml, embed74k)
                 if (links != null) {
-                    foundLink = true
-                    
-                    // Add hls4 (74k.io stream proxy) - highest priority
-                    if (links.hls4 != null) {
-                        val hls4Url = if (links.hls4.startsWith("/")) {
-                            "https://74k.io${links.hls4}"
-                        } else links.hls4
-                        
-                        callback.invoke(
-                            newExtractorLink(
-                                source = "XTapes",
-                                name = "XTapes - HLS4",
-                                url = hls4Url,
-                                type = ExtractorLinkType.M3U8
-                            ) {
-                                this.referer = embedUrl
-                                this.quality = Qualities.Unknown.value
-                                this.headers = mapOf(
-                                    "Origin" to "https://74k.io",
-                                    "Referer" to embedUrl
-                                )
-                            }
-                        )
-                    }
-                    
-                    // Add hls2 (direct CDN) - fallback
-                    if (links.hls2 != null) {
-                        callback.invoke(
-                            newExtractorLink(
-                                source = "XTapes",
-                                name = "XTapes - HLS2",
-                                url = links.hls2,
-                                type = ExtractorLinkType.M3U8
-                            ) {
-                                this.referer = embedUrl
-                                this.quality = Qualities.Unknown.value
-                                this.headers = mapOf(
-                                    "Origin" to "https://74k.io",
-                                    "Referer" to embedUrl
-                                )
-                            }
-                        )
-                    }
-                    
-                    // Add hls3 (alternative CDN) - second fallback
-                    if (links.hls3 != null) {
-                        callback.invoke(
-                            newExtractorLink(
-                                source = "XTapes",
-                                name = "XTapes - HLS3",
-                                url = links.hls3,
-                                type = ExtractorLinkType.M3U8
-                            ) {
-                                this.referer = embedUrl
-                                this.quality = Qualities.Unknown.value
-                                this.headers = mapOf(
-                                    "Origin" to "https://74k.io",
-                                    "Referer" to embedUrl
-                                )
-                            }
-                        )
-                    }
+                    links.hls4?.let { addHlsLink("XTapes - HLS4", it, embed74k, reportLink) }
+                    links.hls2?.let { addHlsLink("XTapes - HLS2", it, embed74k, reportLink) }
+                    links.hls3?.let { addHlsLink("XTapes - HLS3", it, embed74k, reportLink) }
                 }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 Log.e("XTapes", "Error extracting from 74k.io: ${e.message}")
             }
         }
 
-        // ===== Method 2: Try other iframes with loadExtractor =====
+        // Always observe whether loadExtractor actually invokes the callback; its return value is not a link count.
         if (!foundLink) {
-            for (iframe in iframeSrcs) {
-                val src = iframe
-                if (src.isNotEmpty() && !src.contains("recaptcha") && !src.contains("twitter") 
-                    && !src.contains("izerv") && !src.contains("timbuk") 
-                    && src != "javascript:false" && !src.contains("74k.io")) {
-                    try {
-                        loadExtractor(fixUrl(src), data, subtitleCallback, callback)
-                    } catch (e: Exception) {
-                        Log.e("XTapes", "Error loading extractor for $src: ${e.message}")
-                    }
+            for (iframeUrl in iframeUrls) {
+                if (isHostOrSubdomain(iframeUrl, "74k.io") || isIgnoredIframe(iframeUrl)) continue
+                try {
+                    loadExtractor(iframeUrl, pageUrl, subtitleCallback, reportLink)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.e("XTapes", "Error loading extractor for $iframeUrl: ${e.message}")
                 }
             }
         }
 
-        // ===== Method 3: Try direct video URLs in page source =====
+        // Last resort for pages that expose a direct source rather than an iframe.
         if (!foundLink) {
-            val patterns = listOf(
-                Regex("""video_url['"]?\s*[:=]\s*['"]([^'"]+)['"]"""),
-                Regex("""source['"]?\s*[:=]\s*['"]([^'"]+\.mp4[^'"]*)['"]"""),
-                Regex("""file['"]?\s*[:=]\s*['"]([^'"]+\.mp4[^'"]*)['"]"""),
-                Regex("""(https?://[^\s'"<>]+\.m3u8[^\s'"<>]*)""")
+            val sourcePattern = Regex(
+                """(?:video_url|source|file)\s*[:=]\s*['\"]([^'\"]+)['\"]""",
+                RegexOption.IGNORE_CASE
             )
-
-            for (pattern in patterns) {
-                val match = pattern.find(pageHtml)
-                if (match != null) {
-                    val videoUrl = match.groupValues[1].replace("\\/", "/")
-                    if (videoUrl.contains(".mp4") || videoUrl.contains(".m3u8")) {
-                        val linkType = if (videoUrl.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                        callback.invoke(
-                            newExtractorLink(this.name, this.name, videoUrl, linkType) {
-                                this.referer = "$mainUrl/"
-                                this.quality = Qualities.Unknown.value
-                            }
-                        )
-                        foundLink = true
-                        break
-                    }
+            val directUrl = sourcePattern.find(pageHtml)?.groupValues?.get(1)
+                ?: Regex(
+                    """(?:(?:https?:)?//|/)[^\s'\"<>;,]+?\.m3u8(?:\?[^\s'\"<>;,]*)?""",
+                    RegexOption.IGNORE_CASE
+                ).find(pageHtml)?.value
+            val videoUrl = directUrl?.let { resolveUrl(pageUrl, it) }
+            if (videoUrl != null && (videoUrl.contains(".mp4", ignoreCase = true) || videoUrl.contains(".m3u8", ignoreCase = true))) {
+                val linkType = if (videoUrl.contains(".m3u8", ignoreCase = true)) {
+                    ExtractorLinkType.M3U8
+                } else {
+                    ExtractorLinkType.VIDEO
                 }
+                reportLink(
+                    newExtractorLink(this.name, this.name, videoUrl, linkType) {
+                        this.referer = pageUrl
+                        this.quality = Qualities.Unknown.value
+                    }
+                )
             }
         }
 
         return foundLink
     }
 
-    /**
-     * Data class to hold the extracted HLS links from 74k.io
-     */
+    private fun isIgnoredIframe(url: String): Boolean = listOf(
+        "recaptcha", "twitter", "izerv", "timbuk", "facebook.com/plugins", "platform.twitter.com"
+    ).any { url.contains(it, ignoreCase = true) }
+
+    private fun isHostOrSubdomain(url: String, host: String): Boolean {
+        val actualHost = try {
+            URI(url).host?.lowercase()
+        } catch (_: Exception) {
+            null
+        } ?: return false
+        return actualHost == host || actualHost.endsWith(".$host")
+    }
+
+    private fun resolveUrl(baseUrl: String, rawUrl: String): String? {
+        val candidate = rawUrl.trim()
+            .trim('"', '\'')
+            .replace("\\/", "/")
+            .replace("&amp;", "&")
+            .replace(" ", "%20")
+        if (candidate.isBlank() || candidate.startsWith("javascript:", ignoreCase = true) ||
+            candidate.startsWith("data:", ignoreCase = true)
+        ) return null
+
+        return try {
+            val base = URI(baseUrl)
+            val target = URI(candidate)
+            val resolved = if (target.isAbsolute) target else base.resolve(target)
+            if ((resolved.scheme == "http" || resolved.scheme == "https") && !resolved.host.isNullOrBlank()) {
+                resolved.toASCIIString()
+            } else {
+                null
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun addHlsLink(
+        label: String,
+        rawUrl: String,
+        embedUrl: String,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        val streamUrl = resolveUrl(embedUrl, rawUrl) ?: return false
+        if (!streamUrl.contains(".m3u8", ignoreCase = true)) return false
+        val origin = try {
+            URI(embedUrl).let { "${it.scheme}://${it.rawAuthority}" }
+        } catch (_: Exception) {
+            "https://74k.io"
+        }
+        callback(
+            newExtractorLink(
+                source = name,
+                name = label,
+                url = streamUrl,
+                type = ExtractorLinkType.M3U8
+            ) {
+                this.referer = embedUrl
+                this.quality = Qualities.Unknown.value
+                this.headers = mapOf(
+                    "User-Agent" to browserHeaders.getValue("User-Agent"),
+                    "Origin" to origin,
+                    "Referer" to embedUrl
+                )
+            }
+        )
+        return true
+    }
+
     private data class HlsLinks(
         val hls2: String? = null,
         val hls3: String? = null,
@@ -312,115 +326,80 @@ class XTapes : MainAPI() {
     )
 
     /**
-     * Extract video links from 74k.io embed page.
-     * The page contains packed JavaScript (eval packer) with JWPlayer setup
-     * that includes HLS stream URLs.
+     * Use CloudStream's maintained packer implementation (including non-decimal radices)
+     * instead of a local base-62 decoder. Only scripts that contain the packer are tried.
      */
     private fun extract74kLinks(html: String, embedUrl: String): HlsLinks? {
-        try {
-            // Method A: Unpack the eval-packed JavaScript
-            val unpacked = jsUnpack(html)
-            if (unpacked != null) {
-                Log.d("XTapes", "Successfully unpacked JS from 74k.io")
-                return extractLinksFromUnpacked(unpacked, embedUrl)
-            }
-            
-            // Method B: Try using CloudStream's built-in JsUnpacker
+        val packerSignature = Regex(
+            """function\s*\(\s*p\s*,\s*a\s*,\s*c\s*,\s*k\s*,\s*e\s*,\s*d\s*\)""",
+            RegexOption.IGNORE_CASE
+        )
+        val scripts = org.jsoup.Jsoup.parse(html).select("script")
+            .map { it.data().ifBlank { it.html() } }
+            .filter { packerSignature.containsMatchIn(it) }
+            .ifEmpty { listOf(html) }
+
+        for (script in scripts) {
             try {
-                val packedScript = Regex("""eval\(function\(p,a,c,k,e,d\)[\s\S]*?\)\)""").find(html)?.value
-                if (packedScript != null) {
-                    val csUnpacked = JsUnpacker(packedScript).unpack()
-                    if (csUnpacked != null) {
-                        Log.d("XTapes", "Unpacked with CS JsUnpacker")
-                        return extractLinksFromUnpacked(csUnpacked, embedUrl)
-                    }
+                val unpacked = JsUnpacker(script).unpack()
+                if (!unpacked.isNullOrBlank()) {
+                    extractLinksFromUnpacked(unpacked, embedUrl)?.let { return it }
                 }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
-                Log.d("XTapes", "CS JsUnpacker failed: ${e.message}")
+                Log.d("XTapes", "JS unpacker failed: ${e.message}")
             }
-
-            // Method C: Try to extract URLs directly from the packed dictionary
-            val directLinks = extractLinksFromPackedDict(html)
-            if (directLinks != null) return directLinks
-
-        } catch (e: Exception) {
-            Log.e("XTapes", "Error in extract74kLinks: ${e.message}")
         }
-        return null
+
+        return extractLinksFromUnpacked(html, embedUrl) ?: extractLinksFromPackedDict(html, embedUrl)
     }
 
-    /**
-     * Extract HLS links from unpacked JavaScript content.
-     */
     private fun extractLinksFromUnpacked(unpacked: String, embedUrl: String): HlsLinks? {
-        var hls2: String? = null
-        var hls3: String? = null
-        var hls4: String? = null
+        val linksContent = Regex("""links\s*=\s*\{([^}]*)}""")
+            .find(unpacked)?.groupValues?.get(1) ?: unpacked
 
-        // Extract the links object: links={"hls2":"URL","hls3":"URL","hls4":"URL"}
-        val linksMatch = Regex("""links\s*=\s*\{([^}]+)\}""").find(unpacked)
-        if (linksMatch != null) {
-            val linksContent = linksMatch.groupValues[1]
-            
-            hls2 = Regex(""""hls2"\s*:\s*"([^"]+)"""").find(linksContent)?.groupValues?.get(1)
-            hls3 = Regex(""""hls3"\s*:\s*"([^"]+)"""").find(linksContent)?.groupValues?.get(1)
-            hls4 = Regex(""""hls4"\s*:\s*"([^"]+)"""").find(linksContent)?.groupValues?.get(1)
-            
-            Log.d("XTapes", "Extracted links - hls2: ${hls2 != null}, hls3: ${hls3 != null}, hls4: ${hls4 != null}")
+        fun urlFor(key: String): String? {
+            val raw = Regex("""[\"']?$key[\"']?\s*:\s*[\"']([^\"']+)[\"']""")
+                .find(linksContent)?.groupValues?.get(1)
+            return raw?.let { resolveUrl(embedUrl, it) }
         }
 
-        // Fallback: try to find m3u8 URLs directly
-        if (hls2 == null && hls4 == null) {
-            val m3u8Urls = Regex("""(https?://[^\s"'<>]+\.m3u8[^\s"'<>]*)""").findAll(unpacked)
-            for (match in m3u8Urls) {
-                val url = match.groupValues[1]
-                if (hls2 == null) hls2 = url
-            }
-            
-            val streamUrls = Regex("""(/stream/[^\s"'<>]+master\.m3u8)""").findAll(unpacked)
-            for (match in streamUrls) {
-                if (hls4 == null) hls4 = match.groupValues[1]
+        var hls2 = urlFor("hls2")
+        var hls3 = urlFor("hls3")
+        var hls4 = urlFor("hls4")
+
+        if (hls2 == null && hls3 == null && hls4 == null) {
+            val urlRegex = Regex(
+                """(?:(?:https?:)?//|/)[^\s'\"<>;,]+?\.m3u8(?:\?[^\s'\"<>;,]*)?""",
+                RegexOption.IGNORE_CASE
+            )
+            for (match in urlRegex.findAll(unpacked)) {
+                val url = resolveUrl(embedUrl, match.value) ?: continue
+                if (hls4 == null && url.contains("/stream/", ignoreCase = true)) hls4 = url
+                else if (hls2 == null) hls2 = url
+                else if (hls3 == null) hls3 = url
             }
         }
 
-        // Also try to find file URL from sources setup
-        if (hls2 == null && hls4 == null) {
-            val fileMatch = Regex("""file\s*:\s*["']([^"']+\.m3u8[^"']*)["']""").find(unpacked)
-            if (fileMatch != null) {
-                hls2 = fileMatch.groupValues[1]
-            }
+        if (hls2 == null && hls3 == null && hls4 == null) {
+            val fileUrl = Regex("""file\s*:\s*[\"']([^\"']+)[\"']""", RegexOption.IGNORE_CASE)
+                .find(unpacked)?.groupValues?.get(1)?.let { resolveUrl(embedUrl, it) }
+            if (fileUrl?.contains(".m3u8", ignoreCase = true) == true) hls2 = fileUrl
         }
 
         return if (hls2 != null || hls3 != null || hls4 != null) {
             HlsLinks(hls2 = hls2, hls3 = hls3, hls4 = hls4)
-        } else null
+        } else {
+            null
+        }
     }
 
-    /**
-     * Try to extract URLs directly from the packed JS dictionary
-     * without fully unpacking. This is a fallback method.
-     */
-    private fun extractLinksFromPackedDict(html: String): HlsLinks? {
-        // The packed JS dictionary contains the URL parts separated by |
-        // Try to find m3u8 URLs or CDN hostnames in the dictionary
-        val dictMatch = Regex("""'([^']+)'\.split\('\|'\)\)\)""").find(html) ?: return null
-        val dict = dictMatch.groupValues[1].split("|")
-        
-        var hls2Url: String? = null
-        
-        // Look for full m3u8 URLs in the dictionary
-        for (word in dict) {
-            if (word.contains("master.m3u8") || (word.contains("m3u8") && word.contains("http"))) {
-                hls2Url = word
-                break
-            }
-        }
-        
-        // If we found a direct URL in the dictionary
-        if (hls2Url != null) {
-            return HlsLinks(hls2 = hls2Url)
-        }
-        
-        return null
+    private fun extractLinksFromPackedDict(html: String, embedUrl: String): HlsLinks? {
+        val dictMatch = Regex("""'([^']+)'\s*\.split\('\|'\)""").find(html) ?: return null
+        val candidate = dictMatch.groupValues[1].split('|')
+            .firstOrNull { it.contains("m3u8", ignoreCase = true) } ?: return null
+        val url = resolveUrl(embedUrl, candidate) ?: return null
+        return HlsLinks(hls2 = url)
     }
 }
