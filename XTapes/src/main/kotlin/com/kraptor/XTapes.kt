@@ -27,6 +27,10 @@ class XTapes : MainAPI() {
         "Accept-Language" to "en-US,en;q=0.9"
     )
 
+    // These are player hosts that CloudStream's extractor registry can resolve.
+    // XTapes may expose them as links instead of iframe elements.
+    private val playerHostHints = listOf("74k.io", "streamtape", "mixdrop", "dood", "bigwarp")
+
     // Entries are kept only where the current route was verified to resolve to that listing.
     override val mainPage = mainPageOf(
         "$mainUrl/?filtre=date&cat=0" to "Latest Videos",
@@ -191,6 +195,10 @@ class XTapes : MainAPI() {
     ): Boolean {
         val pageUrl = resolveUrl(mainUrl, data) ?: return false
         val document = app.get(pageUrl, headers = browserHeaders).document
+        if (document.isSecurityChallenge()) {
+            Log.e("XTapes", "Playback page returned a security challenge; stopping without bypass")
+            return false
+        }
         val pageHtml = document.html()
         var foundLink = false
         val reportLink: (ExtractorLink) -> Unit = { link ->
@@ -210,12 +218,28 @@ class XTapes : MainAPI() {
             }
             .distinct()
 
-        val embed74k = iframeUrls.firstOrNull { isHostOrSubdomain(it, "74k.io") }
+        // Some versions expose the player as a provider anchor, not an iframe.
+        // Restrict this fallback to known player hosts to avoid following page ads/social links.
+        val playerUrls = (iframeUrls.filterNot { isIgnoredIframe(it) } + document.select("a[href]").mapNotNull { anchor ->
+            val candidate = resolveUrl(pageUrl, anchor.attr("href")) ?: return@mapNotNull null
+            candidate.takeIf { isKnownPlayerHost(it) && !isIgnoredIframe(it) }
+        }).distinct()
+        Log.d("XTapes", "Found ${playerUrls.size} player URL candidates")
+
+        val embed74k = playerUrls.firstOrNull { isHostOrSubdomain(it, "74k.io") }
+        var embed74kBlockedByChallenge = false
         if (embed74k != null) {
             try {
-                Log.d("XTapes", "Found 74k.io embed: $embed74k")
-                val embedHtml = app.get(embed74k, referer = pageUrl, headers = browserHeaders).text
-                val links = extract74kLinks(embedHtml, embed74k)
+                Log.d("XTapes", "Found 74k.io player host: ${URI(embed74k).host}")
+                val embedDocument = app.get(embed74k, referer = pageUrl, headers = browserHeaders).document
+                val embedBlockedByChallenge = embedDocument.isSecurityChallenge()
+                if (embedBlockedByChallenge) {
+                    embed74kBlockedByChallenge = true
+                    Log.e("XTapes", "74k.io returned a security challenge; stopping that extraction path")
+                }
+                val links = if (embedBlockedByChallenge) null else {
+                    extract74kLinks(embedDocument.html(), embed74k)
+                }
                 if (links != null) {
                     links.hls4?.let { addHlsLink("XTapes - HLS4", it, embed74k, reportLink) }
                     links.hls2?.let { addHlsLink("XTapes - HLS2", it, embed74k, reportLink) }
@@ -230,14 +254,15 @@ class XTapes : MainAPI() {
 
         // Always observe whether loadExtractor actually invokes the callback; its return value is not a link count.
         if (!foundLink) {
-            for (iframeUrl in iframeUrls) {
-                if (isHostOrSubdomain(iframeUrl, "74k.io") || isIgnoredIframe(iframeUrl)) continue
+            for (playerUrl in playerUrls) {
+                if (embed74kBlockedByChallenge && isHostOrSubdomain(playerUrl, "74k.io")) continue
                 try {
-                    loadExtractor(iframeUrl, pageUrl, subtitleCallback, reportLink)
+                    loadExtractor(playerUrl, pageUrl, subtitleCallback, reportLink)
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
-                    Log.e("XTapes", "Error loading extractor for $iframeUrl: ${e.message}")
+                    val host = try { URI(playerUrl).host } catch (_: Exception) { "unknown" }
+                    Log.e("XTapes", "Error loading extractor for $host: ${e.message}")
                 }
             }
         }
@@ -269,6 +294,8 @@ class XTapes : MainAPI() {
             }
         }
 
+        if (!foundLink) Log.e("XTapes", "No playable links emitted from detail page; player candidates=${playerUrls.size}")
+
         return foundLink
     }
 
@@ -283,6 +310,15 @@ class XTapes : MainAPI() {
             null
         } ?: return false
         return actualHost == host || actualHost.endsWith(".$host")
+    }
+
+    private fun isKnownPlayerHost(url: String): Boolean {
+        val host = try {
+            URI(url).host?.lowercase()
+        } catch (_: Exception) {
+            null
+        } ?: return false
+        return playerHostHints.any { host.contains(it) }
     }
 
     private fun resolveUrl(baseUrl: String, rawUrl: String): String? {
