@@ -15,6 +15,13 @@ class XTapes : MainAPI() {
     override val supportedTypes       = setOf(TvType.NSFW)
     override val vpnStatus            = VPNStatus.MightBeNeeded
 
+    // The site rejects requests without a browser-like User-Agent (HTTP 403).
+    private val browserHeaders = mapOf(
+        "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+        "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language" to "en-US,en;q=0.9"
+    )
+
     override val mainPage = mainPageOf(
         "${mainUrl}/?filtre=date&cat=0" to "Latest Videos",
         "${mainUrl}/?filtre=views" to "Most Popular",
@@ -53,35 +60,50 @@ class XTapes : MainAPI() {
                 }
             }
         }
-        val document = app.get(url).document
-        val home = document.select("ul.listing-tube li.border-radius-5").mapNotNull { it.toSearchResult() }
+        val document = app.get(url, headers = browserHeaders).document
+        val home = document.select("ul.listing-tube li, ul.listing-videos li")
+            .mapNotNull { it.toSearchResult() }
+        Log.d("XTapes", "Loaded ${home.size} video cards from $url")
         return newHomePageResponse(request.name, home, hasNext = home.isNotEmpty())
     }
 
     private fun Element.toSearchResult(): SearchResponse? {
-        val anchor = this.selectFirst("a[title]") ?: return null
-        val title = anchor.attr("title").ifEmpty { 
-            this.selectFirst("h3")?.text() ?: this.selectFirst("strong")?.text()
-        } ?: return null
+        val anchor = this.selectFirst("a[href][title]") ?: this.selectFirst("a[href]") ?: return null
+        val image = this.selectFirst("img")
+        val title = listOfNotNull(
+            anchor.attr("title").takeIf { it.isNotBlank() },
+            image?.attr("alt")?.takeIf { it.isNotBlank() },
+            image?.attr("title")?.takeIf { it.isNotBlank() },
+            this.selectFirst("h3")?.text()?.takeIf { it.isNotBlank() },
+            anchor.text().takeIf { it.isNotBlank() }
+        ).firstOrNull() ?: return null
         val href = fixUrlNull(anchor.attr("href")) ?: return null
-        val posterUrl = fixUrlNull(
-            this.selectFirst("img")?.attr("src")
-        )
+        val posterCandidate = image?.let { poster ->
+            listOf("data-src", "data-original", "data-lazy-src", "data-original-src", "src", "data-srcset", "srcset")
+                .asSequence()
+                .map { poster.attr(it) }
+                .firstOrNull { it.isNotBlank() && !it.startsWith("data:image", ignoreCase = true) }
+                ?.substringBefore(",")
+                ?.substringBefore(" ")
+        }
+        val posterUrl = fixUrlNull(posterCandidate)
         return newMovieSearchResponse(title.trim(), href, TvType.NSFW) {
             this.posterUrl = posterUrl
         }
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        val searchUrl = "${mainUrl}/?s=${query}"
-        val document = app.get(searchUrl).document
-        return document.select("ul.listing-tube li.border-radius-5").mapNotNull { it.toSearchResult() }
+        val encodedQuery = java.net.URLEncoder.encode(query, "UTF-8")
+        val searchUrl = "${mainUrl}/?s=$encodedQuery"
+        val document = app.get(searchUrl, headers = browserHeaders).document
+        return document.select("ul.listing-tube li, ul.listing-videos li")
+            .mapNotNull { it.toSearchResult() }
     }
 
     override suspend fun quickSearch(query: String): List<SearchResponse>? = search(query)
 
     override suspend fun load(url: String): LoadResponse? {
-        val document = app.get(url).document
+        val document = app.get(url, headers = browserHeaders).document
         val title = document.selectFirst("h1")?.text()?.trim() ?: return null
         val poster = fixUrlNull(
             document.selectFirst("meta[itemprop=thumbnailUrl]")?.attr("content")
@@ -138,7 +160,7 @@ class XTapes : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val document = app.get(data).document
+        val document = app.get(data, headers = browserHeaders).document
         val pageHtml = document.html()
         var foundLink = false
 
