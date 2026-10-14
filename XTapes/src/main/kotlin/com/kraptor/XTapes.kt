@@ -11,7 +11,7 @@ import java.net.URI
 import java.net.URLEncoder
 
 class XTapes : MainAPI() {
-    // The site now serves its canonical pages from xtapes.la; the old .tw host redirects here.
+    // Use each response's final URL below so .la/.tw canonical-host redirects do not corrupt embed resolution.
     override var mainUrl = "https://xtapes.la"
     override var name = "XTapes"
     override val hasMainPage = true
@@ -61,16 +61,18 @@ class XTapes : MainAPI() {
             "${path.trimEnd('/')}/page/$page/$query"
         }
 
-        val document = app.get(url, headers = browserHeaders).document
+        val response = app.get(url, headers = browserHeaders, allowRedirects = true)
+        val finalPageUrl = response.url
+        val document = response.document
         val blockedByChallenge = document.isSecurityChallenge()
         if (blockedByChallenge) {
             Log.e("XTapes", "Cloudflare security challenge blocked video listing: $url")
         }
         val home = if (blockedByChallenge) emptyList() else {
             document.select("ul.listing-tube li, ul.listing-videos li")
-                .mapNotNull { it.toSearchResult() }
+                .mapNotNull { it.toSearchResult(finalPageUrl) }
         }
-        Log.d("XTapes", "Loaded ${home.size} video cards from $url")
+        Log.d("XTapes", "Loaded ${home.size} video cards from $finalPageUrl")
         return newHomePageResponse(
             list = HomePageList(
                 name = request.name,
@@ -92,7 +94,7 @@ class XTapes : MainAPI() {
         rel || classes || anchor.text().contains("next videos", ignoreCase = true)
     }
 
-    private fun Element.toSearchResult(): SearchResponse? {
+    private fun Element.toSearchResult(baseUrl: String): SearchResponse? {
         val anchor = selectFirst("a[href][title]") ?: selectFirst("a[href]") ?: return null
         val image = selectFirst("img")
         val title = listOfNotNull(
@@ -102,7 +104,7 @@ class XTapes : MainAPI() {
             selectFirst("h3")?.text()?.takeIf { it.isNotBlank() },
             anchor.text().takeIf { it.isNotBlank() }
         ).firstOrNull() ?: return null
-        val href = fixUrlNull(anchor.attr("href")) ?: return null
+        val href = resolveUrl(baseUrl, anchor.attr("href")) ?: return null
         val posterCandidate = image?.let { poster ->
             listOf("data-src", "data-original", "data-lazy-src", "data-original-src", "src", "data-srcset", "srcset")
                 .asSequence()
@@ -111,7 +113,7 @@ class XTapes : MainAPI() {
                 ?.substringBefore(",")
                 ?.substringBefore(" ")
         }
-        val posterUrl = posterCandidate?.let { resolveUrl(mainUrl, it) }
+        val posterUrl = posterCandidate?.let { resolveUrl(baseUrl, it) }
         return newMovieSearchResponse(title.trim(), href, TvType.NSFW) {
             this.posterUrl = posterUrl
         }
@@ -119,20 +121,23 @@ class XTapes : MainAPI() {
 
     override suspend fun search(query: String): List<SearchResponse> {
         val encodedQuery = URLEncoder.encode(query, Charsets.UTF_8.name())
-        val document = app.get("$mainUrl/?s=$encodedQuery", headers = browserHeaders).document
+        val response = app.get("$mainUrl/?s=$encodedQuery", headers = browserHeaders, allowRedirects = true)
+        val document = response.document
         if (document.isSecurityChallenge()) {
             Log.e("XTapes", "Cloudflare security challenge blocked search results")
             return emptyList()
         }
         return document.select("ul.listing-tube li, ul.listing-videos li")
-            .mapNotNull { it.toSearchResult() }
+            .mapNotNull { it.toSearchResult(response.url) }
     }
 
     override suspend fun quickSearch(query: String): List<SearchResponse>? = search(query)
 
     override suspend fun load(url: String): LoadResponse? {
-        val pageUrl = resolveUrl(mainUrl, url) ?: return null
-        val document = app.get(pageUrl, headers = browserHeaders).document
+        val requestedPageUrl = resolveUrl(mainUrl, url) ?: return null
+        val response = app.get(requestedPageUrl, headers = browserHeaders, allowRedirects = true)
+        val pageUrl = response.url
+        val document = response.document
         val title = document.selectFirst("h1")?.text()?.trim()
             ?.takeIf { it.isNotBlank() }
             ?: document.selectFirst("meta[property=og:title]")?.attr("content")?.trim()
@@ -194,10 +199,14 @@ class XTapes : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val pageUrl = resolveUrl(mainUrl, data) ?: return false
-        val document = app.get(pageUrl, headers = browserHeaders).document
+        val requestedPageUrl = resolveUrl(mainUrl, data) ?: return false
+        val response = app.get(requestedPageUrl, headers = browserHeaders, allowRedirects = true)
+        val pageUrl = response.url
+        val document = response.document
         if (document.isSecurityChallenge()) {
-            Log.e("XTapes", "Playback page returned a security challenge; stopping without bypass")
+            val finalHost = runCatching { URI(pageUrl).host }.getOrNull()
+            val requestedHost = runCatching { URI(requestedPageUrl).host }.getOrNull()
+            Log.e("XTapes", "Playback page returned a security challenge; requested=$requestedHost, final=$finalHost; stopping without bypass")
             return false
         }
         val pageHtml = document.html()
@@ -208,6 +217,12 @@ class XTapes : MainAPI() {
                 callback(link)
             }
         }
+
+        // XMoviesForYou uses the site root as Referer; try that first, then the detail URL for hosts that require it.
+        val siteRootReferer = runCatching {
+            URI(pageUrl).let { "${it.scheme}://${it.rawAuthority}/" }
+        }.getOrDefault(pageUrl)
+        val extractorReferers = listOf(siteRootReferer, pageUrl).distinct()
 
         // Resolve each attribute before choosing it: src="about:blank" must not mask a real lazy URL.
         val iframeUrls = document.select(
@@ -260,14 +275,18 @@ class XTapes : MainAPI() {
         if (!foundLink) {
             for (playerUrl in playerUrls) {
                 if (embed74kBlockedByChallenge && isHostOrSubdomain(playerUrl, "74k.io")) continue
-                try {
-                    loadExtractor(playerUrl, pageUrl, subtitleCallback, reportLink)
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    val host = try { URI(playerUrl).host } catch (_: Exception) { "unknown" }
-                    Log.e("XTapes", "Error loading extractor for $host: ${e.message}")
+                for (referer in extractorReferers) {
+                    if (foundLink) break
+                    try {
+                        loadExtractor(playerUrl, referer, subtitleCallback, reportLink)
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        val host = try { URI(playerUrl).host } catch (_: Exception) { "unknown" }
+                        Log.e("XTapes", "Error loading extractor for $host: ${e.message}")
+                    }
                 }
+                if (foundLink) break
             }
         }
 
