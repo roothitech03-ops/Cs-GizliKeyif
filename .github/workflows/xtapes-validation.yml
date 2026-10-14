@@ -1,0 +1,40 @@
+name: XTapes Validation
+
+on:
+  pull_request:
+    branches:
+      - master
+      - main
+    paths:
+      - "XTapes/**"
+      - "build.gradle.kts"
+      - "settings.gradle.kts"
+      - "gradle/**"
+      - "gradlew"
+      - ".github/workflows/xtapes-validation.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build XTapes plugin
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Set up JDK 21
+        uses: actions/setup-java@v6
+        with:
+          java-version: 21
+          distribution: temurin
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: 'platform-tools platforms;android-35 build-tools;35.0.0'
+
+      - name: Build XTapes
+        run: |
+          chmod +x gradlew
+          ./gradlew :XTapes:build --no-daemon
