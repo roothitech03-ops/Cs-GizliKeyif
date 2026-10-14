@@ -7,6 +7,7 @@ import org.jsoup.nodes.Element
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.utils.ExtractorLink
+import com.google.gson.Gson
 import com.lagradost.cloudstream3.LoadResponse.Companion.addActors
 import java.security.MessageDigest
 
@@ -182,7 +183,7 @@ class PornHD4K : MainAPI() {
 
         try {
             // Parse JSON: {"playlist":[{"image":"...","sources":[{"file":"...","type":"...","label":"..."}]}]}
-            val parsed = AppUtils.parseJson<AjaxResponse>(jsonText)
+            val parsed = Gson().fromJson(jsonText, AjaxResponse::class.java)
             parsed.playlist?.forEach { item ->
                 item.sources?.forEach { source ->
                     val fileUrl = source.file

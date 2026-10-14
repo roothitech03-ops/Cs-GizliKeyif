@@ -6,7 +6,7 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
-
+import com.google.gson.Gson
 @Suppress("ClassName")
 class xHamster : MainAPI() {
     override var mainUrl = "https://xhamster.com"
@@ -198,7 +198,7 @@ private fun getInitialsJson(html: String): InitialsJson? {
         
         
         
-        val parsedJson = AppUtils.parseJson<InitialsJson>(jsonString)
+        val parsedJson = Gson().fromJson(jsonString, InitialsJson::class.java)
         
         
         
