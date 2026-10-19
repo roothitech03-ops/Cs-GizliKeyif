@@ -289,20 +289,10 @@ class XTapes : MainAPI() {
             if (!got74kDirectLinks) {
                 try {
                     Log.d("XTapes", "74k.io direct failed; trying WebView fallback")
-                    val webViewCallback: (ExtractorLink) -> Unit = { link ->
-                        if (link.url.isNotBlank()) {
-                            // Report as 74k.io source (rename from generic WebView)
-                            val renamed = newExtractorLink(
-                                link.source, "XTapes - 74k.io", link.url, link.type
-                            ) {
-                                this.referer = link.referer
-                                this.quality = link.quality
-                            }
-                            reportLink(renamed)
-                            foundLink = true
-                        }
+                    if (extractViaWebView(embed74k, reportLink)) {
+                        foundLink = true
+                        Log.d("XTapes", "Got 74k.io stream via WebView")
                     }
-                    extractViaWebView(embed74k, webViewCallback)
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
