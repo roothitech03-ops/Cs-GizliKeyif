@@ -321,7 +321,6 @@ class XTapes : MainAPI() {
                     }
                 }
             }
-        }
 
         // Last resort for pages that expose a direct source rather than an iframe.
         if (!foundLink) {
