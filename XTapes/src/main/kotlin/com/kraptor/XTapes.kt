@@ -5,6 +5,8 @@ import android.content.Context
 import android.os.Handler
 import android.os.Looper
 import android.webkit.WebResourceRequest
+import org.jsoup.Jsoup
+import org.json.JSONObject
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -73,7 +75,7 @@ class XTapes : MainAPI() {
 
         val response = app.get(url, headers = browserHeaders, allowRedirects = true)
         val finalPageUrl = response.url
-        val document = response.document
+        var document = response.document
         val blockedByChallenge = document.isSecurityChallenge()
         if (blockedByChallenge) {
             Log.e("XTapes", "Cloudflare security challenge blocked video listing: $url")
@@ -132,7 +134,7 @@ class XTapes : MainAPI() {
     override suspend fun search(query: String): List<SearchResponse> {
         val encodedQuery = URLEncoder.encode(query, Charsets.UTF_8.name())
         val response = app.get("$mainUrl/?s=$encodedQuery", headers = browserHeaders, allowRedirects = true)
-        val document = response.document
+        var document = response.document
         if (document.isSecurityChallenge()) {
             Log.e("XTapes", "Cloudflare security challenge blocked search results")
             return emptyList()
@@ -147,7 +149,7 @@ class XTapes : MainAPI() {
         val requestedPageUrl = resolveUrl(mainUrl, url) ?: return null
         val response = app.get(requestedPageUrl, headers = browserHeaders, allowRedirects = true)
         val pageUrl = response.url
-        val document = response.document
+        var document = response.document
         val title = document.selectFirst("h1")?.text()?.trim()
             ?.takeIf { it.isNotBlank() }
             ?: document.selectFirst("meta[property=og:title]")?.attr("content")?.trim()
@@ -212,15 +214,24 @@ class XTapes : MainAPI() {
         val requestedPageUrl = resolveUrl(mainUrl, data) ?: return false
         val response = app.get(requestedPageUrl, headers = browserHeaders, allowRedirects = true)
         val pageUrl = response.url
-        val document = response.document
+        var document = response.document
         // Cloudflare hard-blocks non-browser TLS fingerprints with HTTP 403 (tiny plain-text
         // body) which isSecurityChallenge() cannot detect. A real WebView uses Chrome's TLS
         // stack and passes, so go straight to the WebView fallback when blocked.
         if (response.code == 403 || document.isSecurityChallenge()) {
             val finalHost = runCatching { URI(pageUrl).host }.getOrNull()
             val requestedHost = runCatching { URI(requestedPageUrl).host }.getOrNull()
-            Log.e("XTapes", "Playback page blocked by Cloudflare (HTTP ${response.code}); requested=$requestedHost, final=$finalHost; trying WebView fallback")
-            return extractViaWebView(pageUrl, callback)
+            Log.e("XTapes", "Playback page blocked by Cloudflare (HTTP ${response.code}); requested=$requestedHost, final=$finalHost; trying WebView HTML fallback")
+            // Render the page in a real WebView to bypass Cloudflare, then parse the
+            // HTML for iframe/player URLs so 74k.io and 88z.io sources are also found.
+            val webHtml = getHtmlViaWebView(pageUrl)
+            if (webHtml != null) {
+                document = Jsoup.parse(webHtml, pageUrl)
+                Log.d("XTapes", "Got page HTML via WebView (${webHtml.length} chars); continuing with normal extraction")
+            } else {
+                Log.e("XTapes", "WebView HTML fallback failed; using stream interception only")
+                return extractViaWebView(pageUrl, callback)
+            }
         }
         val pageHtml = document.html()
         var foundLink = false
@@ -367,6 +378,53 @@ class XTapes : MainAPI() {
      * that block OkHttp-based requests (HTTP 403). Same pattern as the 18EU provider.
      */
     @SuppressLint("SetJavaScriptEnabled")
+    /**
+     * Loads a Cloudflare-blocked page in a real WebView and returns the rendered HTML,
+     * so iframe/player URLs can be extracted even when direct HTTP gets 403.
+     */
+    private suspend fun getHtmlViaWebView(pageUrl: String): String? {
+        val context = runCatching {
+            Class.forName("android.app.ActivityThread")
+                .getMethod("currentApplication")
+                .invoke(null) as? Context
+        }.getOrNull() ?: return null
+
+        return suspendCancellableCoroutine { cont ->
+            Handler(Looper.getMainLooper()).post {
+                val webView = WebView(context).apply {
+                    settings.javaScriptEnabled = true
+                    settings.domStorageEnabled = true
+                    settings.userAgentString = browserHeaders.getValue("User-Agent")
+                }
+                webView.webViewClient = object : WebViewClient() {
+                    override fun onPageFinished(view: WebView, url: String?) {
+                        // Give JS a moment to render iframes, then grab the HTML.
+                        view.postDelayed({
+                            view.evaluateJavascript("document.documentElement.outerHTML") { html ->
+                                if (cont.isActive) {
+                                    // evaluateJavascript returns a JSON-encoded string;
+                                    // decode it to get the raw HTML.
+                                    val decoded = runCatching {
+                                        JSONObject("{\"v\":$html}").getString("v")
+                                    }.getOrNull()
+                                    cont.resume(decoded)
+                                }
+                                view.destroy()
+                            }
+                        }, 3000)
+                    }
+                }
+                webView.loadUrl(pageUrl)
+                Handler(Looper.getMainLooper()).postDelayed({
+                    if (cont.isActive) {
+                        cont.resume(null)
+                        webView.destroy()
+                    }
+                }, 20_000)
+            }
+        }
+    }
+
     private suspend fun extractViaWebView(
         pageUrl: String,
         callback: (ExtractorLink) -> Unit
