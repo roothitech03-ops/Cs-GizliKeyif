@@ -284,28 +284,36 @@ class XTapes : MainAPI() {
             }
         }
 
-        // Always observe whether loadExtractor actually invokes the callback; its return value is not a link count.
-        if (!foundLink) {
-            for (playerUrl in playerUrls) {
-                if (embed74kBlockedByChallenge && isHostOrSubdomain(playerUrl, "74k.io")) continue
-                // 88z.io is a JS-only embed host with no CloudStream extractor; render it in a
-                // WebView and intercept the .m3u8/.mp4 request directly.
-                if (isHostOrSubdomain(playerUrl, "88z.io")) {
-                    try {
-                        Log.d("XTapes", "Found 88z.io player; extracting via WebView")
-                        if (extractViaWebView(playerUrl, reportLink)) foundLink = true
-                    } catch (e: CancellationException) {
-                        throw e
-                    } catch (e: Exception) {
-                        Log.e("XTapes", "Error extracting from 88z.io: ${e.message}")
-                    }
-                    if (foundLink) break
-                    continue
+        // Try every player so the user gets sources from all of them and can pick the fastest.
+        // Do not stop after the first player that yields links.
+        for (playerUrl in playerUrls) {
+            if (embed74kBlockedByChallenge && isHostOrSubdomain(playerUrl, "74k.io")) continue
+            // 88z.io is a JS-only embed host with no CloudStream extractor; render it in a
+            // WebView and intercept the .m3u8/.mp4 request directly.
+            if (isHostOrSubdomain(playerUrl, "88z.io")) {
+                try {
+                    Log.d("XTapes", "Found 88z.io player; extracting via WebView")
+                    if (extractViaWebView(playerUrl, reportLink)) foundLink = true
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.e("XTapes", "Error extracting from 88z.io: ${e.message}")
                 }
-                for (referer in extractorReferers) {
-                    if (foundLink) break
-                    try {
-                        loadExtractor(playerUrl, referer, subtitleCallback, reportLink)
+                continue
+            }
+            // Per-player flag: try referers until THIS player yields links, without
+            // skipping the remaining players once an earlier one succeeded.
+            var playerFoundLink = false
+            val playerReportLink: (ExtractorLink) -> Unit = { link ->
+                if (link.url.isNotBlank()) {
+                    playerFoundLink = true
+                    reportLink(link)
+                }
+            }
+            for (referer in extractorReferers) {
+                if (playerFoundLink) break
+                try {
+                    loadExtractor(playerUrl, referer, subtitleCallback, playerReportLink)
                     } catch (e: CancellationException) {
                         throw e
                     } catch (e: Exception) {
@@ -313,8 +321,7 @@ class XTapes : MainAPI() {
                         Log.e("XTapes", "Error loading extractor for $host: ${e.message}")
                     }
                 }
-                if (foundLink) break
-            }
+                }
         }
 
         // Last resort for pages that expose a direct source rather than an iframe.
