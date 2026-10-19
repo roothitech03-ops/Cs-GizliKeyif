@@ -5,8 +5,6 @@ import android.content.Context
 import android.os.Handler
 import android.os.Looper
 import android.webkit.WebResourceRequest
-import org.jsoup.Jsoup
-import org.json.JSONObject
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -75,7 +73,7 @@ class XTapes : MainAPI() {
 
         val response = app.get(url, headers = browserHeaders, allowRedirects = true)
         val finalPageUrl = response.url
-        var document = response.document
+        val document = response.document
         val blockedByChallenge = document.isSecurityChallenge()
         if (blockedByChallenge) {
             Log.e("XTapes", "Cloudflare security challenge blocked video listing: $url")
@@ -134,7 +132,7 @@ class XTapes : MainAPI() {
     override suspend fun search(query: String): List<SearchResponse> {
         val encodedQuery = URLEncoder.encode(query, Charsets.UTF_8.name())
         val response = app.get("$mainUrl/?s=$encodedQuery", headers = browserHeaders, allowRedirects = true)
-        var document = response.document
+        val document = response.document
         if (document.isSecurityChallenge()) {
             Log.e("XTapes", "Cloudflare security challenge blocked search results")
             return emptyList()
@@ -149,7 +147,7 @@ class XTapes : MainAPI() {
         val requestedPageUrl = resolveUrl(mainUrl, url) ?: return null
         val response = app.get(requestedPageUrl, headers = browserHeaders, allowRedirects = true)
         val pageUrl = response.url
-        var document = response.document
+        val document = response.document
         val title = document.selectFirst("h1")?.text()?.trim()
             ?.takeIf { it.isNotBlank() }
             ?: document.selectFirst("meta[property=og:title]")?.attr("content")?.trim()
@@ -214,24 +212,15 @@ class XTapes : MainAPI() {
         val requestedPageUrl = resolveUrl(mainUrl, data) ?: return false
         val response = app.get(requestedPageUrl, headers = browserHeaders, allowRedirects = true)
         val pageUrl = response.url
-        var document = response.document
+        val document = response.document
         // Cloudflare hard-blocks non-browser TLS fingerprints with HTTP 403 (tiny plain-text
         // body) which isSecurityChallenge() cannot detect. A real WebView uses Chrome's TLS
         // stack and passes, so go straight to the WebView fallback when blocked.
         if (response.code == 403 || document.isSecurityChallenge()) {
             val finalHost = runCatching { URI(pageUrl).host }.getOrNull()
             val requestedHost = runCatching { URI(requestedPageUrl).host }.getOrNull()
-            Log.e("XTapes", "Playback page blocked by Cloudflare (HTTP ${response.code}); requested=$requestedHost, final=$finalHost; trying WebView HTML fallback")
-            // Render the page in a real WebView to bypass Cloudflare, then parse the
-            // HTML for iframe/player URLs so 74k.io and 88z.io sources are also found.
-            val webHtml = getHtmlViaWebView(pageUrl)
-            if (webHtml != null) {
-                document = Jsoup.parse(webHtml, pageUrl)
-                Log.d("XTapes", "Got page HTML via WebView (${webHtml.length} chars); continuing with normal extraction")
-            } else {
-                Log.e("XTapes", "WebView HTML fallback failed; using stream interception only")
-                return extractViaWebView(pageUrl, callback)
-            }
+            Log.e("XTapes", "Playback page blocked by Cloudflare (HTTP ${response.code}); requested=$requestedHost, final=$finalHost; trying WebView fallback")
+            return extractViaWebView(pageUrl, callback)
         }
         val pageHtml = document.html()
         var foundLink = false
@@ -272,88 +261,62 @@ class XTapes : MainAPI() {
         val embed74k = playerUrls.firstOrNull { isHostOrSubdomain(it, "74k.io") }
         var embed74kBlockedByChallenge = false
         if (embed74k != null) {
-            var got74kLinks = false
             try {
                 Log.d("XTapes", "Found 74k.io player host: ${URI(embed74k).host}")
                 val embedDocument = app.get(embed74k, referer = pageUrl, headers = browserHeaders).document
                 val embedBlockedByChallenge = embedDocument.isSecurityChallenge()
                 if (embedBlockedByChallenge) {
                     embed74kBlockedByChallenge = true
-                    Log.e("XTapes", "74k.io returned a security challenge; trying WebView fallback")
+                    Log.e("XTapes", "74k.io returned a security challenge; stopping that extraction path")
                 }
                 val links = if (embedBlockedByChallenge) null else {
                     extract74kLinks(embedDocument.html(), embed74k)
                 }
                 if (links != null) {
-                    links.hls4?.let { addHlsLink("XTapes - HLS4", it, embed74k, reportLink); got74kLinks = true }
-                    links.hls2?.let { addHlsLink("XTapes - HLS2", it, embed74k, reportLink); got74kLinks = true }
-                    links.hls3?.let { addHlsLink("XTapes - HLS3", it, embed74k, reportLink); got74kLinks = true }
+                    links.hls4?.let { addHlsLink("XTapes - HLS4", it, embed74k, reportLink) }
+                    links.hls2?.let { addHlsLink("XTapes - HLS2", it, embed74k, reportLink) }
+                    links.hls3?.let { addHlsLink("XTapes - HLS3", it, embed74k, reportLink) }
                 }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 Log.e("XTapes", "Error extracting from 74k.io: ${e.message}")
             }
-            // If direct extraction failed (blocked or no links), render the 74k.io
-            // embed in a WebView and intercept the stream URL.
-            if (!got74kLinks) {
-                try {
-                    Log.d("XTapes", "74k.io direct extraction failed; trying WebView")
-                    val webViewLink: (ExtractorLink) -> Unit = { link ->
-                        if (link.url.isNotBlank()) {
-                            // Relabel as 74k.io source so user can identify it.
-                            reportLink(link)
-                        }
-                    }
-                    if (extractViaWebView(embed74k, webViewLink)) {
-                        foundLink = true
-                        Log.d("XTapes", "Got 74k.io stream via WebView")
-                    }
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    Log.e("XTapes", "74k.io WebView fallback failed: ${e.message}")
-                }
-            }
         }
 
         // Try every player so the user gets sources from all of them and can pick the fastest.
-        // Do not stop after the first player that yields links.
         for (playerUrl in playerUrls) {
-                if (embed74kBlockedByChallenge && isHostOrSubdomain(playerUrl, "74k.io")) continue
-                // 88z.io is a JS-only embed host with no CloudStream extractor; render it in a
-                // WebView and intercept the .m3u8/.mp4 request directly.
-                if (isHostOrSubdomain(playerUrl, "88z.io")) {
-                    try {
-                        Log.d("XTapes", "Found 88z.io player; extracting via WebView")
-                        if (extractViaWebView(playerUrl, reportLink)) foundLink = true
-                    } catch (e: CancellationException) {
-                        throw e
-                    } catch (e: Exception) {
-                        Log.e("XTapes", "Error extracting from 88z.io: ${e.message}")
-                    }
-                    continue
+            if (embed74kBlockedByChallenge && isHostOrSubdomain(playerUrl, "74k.io")) continue
+            if (isHostOrSubdomain(playerUrl, "88z.io")) {
+                try {
+                    Log.d("XTapes", "Found 88z.io player; extracting via WebView")
+                    if (extractViaWebView(playerUrl, reportLink)) foundLink = true
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.e("XTapes", "Error extracting from 88z.io: ${e.message}")
                 }
-                // Per-player flag: try referers until THIS player yields links.
-                var playerFoundLink = false
-                val playerReportLink: (ExtractorLink) -> Unit = { link ->
-                    if (link.url.isNotBlank()) {
-                        playerFoundLink = true
-                        reportLink(link)
-                    }
-                }
-                for (referer in extractorReferers) {
-                    if (playerFoundLink) break
-                    try {
-                        loadExtractor(playerUrl, referer, subtitleCallback, playerReportLink)
-                    } catch (e: CancellationException) {
-                        throw e
-                    } catch (e: Exception) {
-                        val host = try { URI(playerUrl).host } catch (_: Exception) { "unknown" }
-                        Log.e("XTapes", "Error loading extractor for $host: ${e.message}")
-                    }
+                continue
+            }
+            var playerFoundLink = false
+            val playerReportLink: (ExtractorLink) -> Unit = { link ->
+                if (link.url.isNotBlank()) {
+                    playerFoundLink = true
+                    reportLink(link)
                 }
             }
+            for (referer in extractorReferers) {
+                if (playerFoundLink) break
+                try {
+                    loadExtractor(playerUrl, referer, subtitleCallback, playerReportLink)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    val host = try { URI(playerUrl).host } catch (_: Exception) { "unknown" }
+                    Log.e("XTapes", "Error loading extractor for $host: ${e.message}")
+                }
+            }
+        }
 
         // Last resort for pages that expose a direct source rather than an iframe.
         if (!foundLink) {
@@ -400,70 +363,6 @@ class XTapes : MainAPI() {
      * that block OkHttp-based requests (HTTP 403). Same pattern as the 18EU provider.
      */
     @SuppressLint("SetJavaScriptEnabled")
-    /**
-     * Loads a Cloudflare-blocked page in a real WebView and returns the rendered HTML,
-     * so iframe/player URLs can be extracted even when direct HTTP gets 403.
-     */
-    private suspend fun getHtmlViaWebView(pageUrl: String): String? {
-        val context = runCatching {
-            Class.forName("android.app.ActivityThread")
-                .getMethod("currentApplication")
-                .invoke(null) as? Context
-        }.getOrNull() ?: return null
-
-        return suspendCancellableCoroutine { cont ->
-            Handler(Looper.getMainLooper()).post {
-                val webView = WebView(context).apply {
-                    settings.javaScriptEnabled = true
-                    settings.domStorageEnabled = true
-                    settings.userAgentString = browserHeaders.getValue("User-Agent")
-                }
-                webView.webViewClient = object : WebViewClient() {
-                    override fun onPageFinished(view: WebView, url: String?) {
-                        // Cloudflare may show a challenge first; poll until video iframes
-                        // appear (or timeout), then grab the HTML.
-                        val startTime = System.currentTimeMillis()
-                        val maxWait = 20_000L
-                        fun checkForIframes() {
-                            if (!cont.isActive) return
-                            view.evaluateJavascript(
-                                "(function(){var f=document.querySelector('iframe[src*=\'74k.io\'],iframe[src*=\'88z.io\']');return f?'found':'waiting';})()"
-                            ) { result ->
-                                if (!cont.isActive) return@evaluateJavascript
-                                val elapsed = System.currentTimeMillis() - startTime
-                                val found = result?.contains("found") == true
-                                if (found || elapsed >= maxWait) {
-                                    // Iframes found or timeout; grab the full HTML now.
-                                    view.evaluateJavascript("document.documentElement.outerHTML") { html ->
-                                        if (cont.isActive) {
-                                            val decoded = runCatching {
-                                                JSONObject("{\"v\":$html}").getString("v")
-                                            }.getOrNull()
-                                            cont.resume(decoded)
-                                        }
-                                        view.destroy()
-                                    }
-                                } else {
-                                    // Check again in 2 seconds.
-                                    view.postDelayed({ checkForIframes() }, 2000)
-                                }
-                            }
-                        }
-                        // Start checking after a short initial delay for Cloudflare.
-                        view.postDelayed({ checkForIframes() }, 4000)
-                    }
-                }
-                webView.loadUrl(pageUrl)
-                Handler(Looper.getMainLooper()).postDelayed({
-                    if (cont.isActive) {
-                        cont.resume(null)
-                        webView.destroy()
-                    }
-                }, 20_000)
-            }
-        }
-    }
-
     private suspend fun extractViaWebView(
         pageUrl: String,
         callback: (ExtractorLink) -> Unit
@@ -493,7 +392,18 @@ class XTapes : MainAPI() {
                         val url = request.url.toString()
                         val isStream = url.contains(".m3u8", ignoreCase = true) ||
                             url.contains(".mp4", ignoreCase = true)
-                        if (cont.isActive && isStream && !url.contains("ads", ignoreCase = true)) {
+                        // Filter out video ads: pre-roll/mid-roll ad URLs and ad-network domains.
+                        // Real video is usually .m3u8 (HLS); ads are often .mp4 from ad servers.
+                        val lowerUrl = url.lowercase()
+                        val isAd = lowerUrl.contains("ads") || lowerUrl.contains("/ad/") ||
+                            lowerUrl.contains("doubleclick") || lowerUrl.contains("googlesyndication") ||
+                            lowerUrl.contains("googleads") || lowerUrl.contains("adnxs") ||
+                            lowerUrl.contains("pubmatic") || lowerUrl.contains("rubicon") ||
+                            lowerUrl.contains("criteo") || lowerUrl.contains("outbrain") ||
+                            lowerUrl.contains("taboola") || lowerUrl.contains("preroll") ||
+                            lowerUrl.contains("midroll") || lowerUrl.contains("vast") ||
+                            lowerUrl.contains("vpaid") || lowerUrl.contains("ima3")
+                        if (cont.isActive && isStream && !isAd) {
                             cont.resume(url)
                             view.post { view.destroy() }
                         }
