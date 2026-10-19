@@ -261,26 +261,53 @@ class XTapes : MainAPI() {
         val embed74k = playerUrls.firstOrNull { isHostOrSubdomain(it, "74k.io") }
         var embed74kBlockedByChallenge = false
         if (embed74k != null) {
+            var got74kDirectLinks = false
             try {
                 Log.d("XTapes", "Found 74k.io player host: ${URI(embed74k).host}")
                 val embedDocument = app.get(embed74k, referer = pageUrl, headers = browserHeaders).document
                 val embedBlockedByChallenge = embedDocument.isSecurityChallenge()
                 if (embedBlockedByChallenge) {
                     embed74kBlockedByChallenge = true
-                    Log.e("XTapes", "74k.io returned a security challenge; stopping that extraction path")
+                    Log.e("XTapes", "74k.io returned a security challenge; trying WebView fallback")
                 }
                 val links = if (embedBlockedByChallenge) null else {
                     extract74kLinks(embedDocument.html(), embed74k)
                 }
                 if (links != null) {
-                    links.hls4?.let { addHlsLink("XTapes - HLS4", it, embed74k, reportLink) }
-                    links.hls2?.let { addHlsLink("XTapes - HLS2", it, embed74k, reportLink) }
-                    links.hls3?.let { addHlsLink("XTapes - HLS3", it, embed74k, reportLink) }
+                    links.hls4?.let { addHlsLink("XTapes - HLS4", it, embed74k, reportLink); got74kDirectLinks = true }
+                    links.hls2?.let { addHlsLink("XTapes - HLS2", it, embed74k, reportLink); got74kDirectLinks = true }
+                    links.hls3?.let { addHlsLink("XTapes - HLS3", it, embed74k, reportLink); got74kDirectLinks = true }
                 }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 Log.e("XTapes", "Error extracting from 74k.io: ${e.message}")
+            }
+            // FALLBACK: If direct 74k.io extraction failed, load the embed in WebView
+            // and intercept the stream. This ensures the fast 74k.io source appears
+            // even when direct HTTP is blocked.
+            if (!got74kDirectLinks) {
+                try {
+                    Log.d("XTapes", "74k.io direct failed; trying WebView fallback")
+                    val webViewCallback: (ExtractorLink) -> Unit = { link ->
+                        if (link.url.isNotBlank()) {
+                            // Report as 74k.io source (rename from generic WebView)
+                            val renamed = newExtractorLink(
+                                link.source, "XTapes - 74k.io", link.url, link.type
+                            ) {
+                                this.referer = link.referer
+                                this.quality = link.quality
+                            }
+                            reportLink(renamed)
+                            foundLink = true
+                        }
+                    }
+                    extractViaWebView(embed74k, webViewCallback)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.e("XTapes", "74k.io WebView fallback failed: ${e.message}")
+                }
             }
         }
 
