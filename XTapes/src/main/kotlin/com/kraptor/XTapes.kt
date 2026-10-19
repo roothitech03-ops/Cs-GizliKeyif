@@ -1,14 +1,23 @@
 package com.kraptor
 
+import android.annotation.SuppressLint
+import android.content.Context
+import android.os.Handler
+import android.os.Looper
+import android.webkit.WebResourceRequest
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import com.lagradost.api.Log
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.LoadResponse.Companion.addActors
 import com.lagradost.cloudstream3.utils.*
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.suspendCancellableCoroutine
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import java.net.URI
 import java.net.URLEncoder
+import kotlin.coroutines.resume
 
 class XTapes : MainAPI() {
     // Use each response's final URL below so .la/.tw canonical-host redirects do not corrupt embed resolution.
@@ -203,11 +212,14 @@ class XTapes : MainAPI() {
         val response = app.get(requestedPageUrl, headers = browserHeaders, allowRedirects = true)
         val pageUrl = response.url
         val document = response.document
-        if (document.isSecurityChallenge()) {
+        // Cloudflare hard-blocks non-browser TLS fingerprints with HTTP 403 (tiny plain-text
+        // body) which isSecurityChallenge() cannot detect. A real WebView uses Chrome's TLS
+        // stack and passes, so go straight to the WebView fallback when blocked.
+        if (response.code == 403 || document.isSecurityChallenge()) {
             val finalHost = runCatching { URI(pageUrl).host }.getOrNull()
             val requestedHost = runCatching { URI(requestedPageUrl).host }.getOrNull()
-            Log.e("XTapes", "Playback page returned a security challenge; requested=$requestedHost, final=$finalHost; stopping without bypass")
-            return false
+            Log.e("XTapes", "Playback page blocked by Cloudflare (HTTP ${response.code}); requested=$requestedHost, final=$finalHost; trying WebView fallback")
+            return extractViaWebView(pageUrl, callback)
         }
         val pageHtml = document.html()
         var foundLink = false
@@ -317,9 +329,95 @@ class XTapes : MainAPI() {
             }
         }
 
+        // Last resort: the HTML extraction found nothing (page layout changed or embeds moved).
+        // Render in a real WebView and intercept the stream URL from network traffic.
+        if (!foundLink) {
+            Log.d("XTapes", "No links via HTML extraction; trying WebView fallback for $pageUrl")
+            foundLink = extractViaWebView(pageUrl, callback)
+        }
+
         if (!foundLink) Log.e("XTapes", "No playable links emitted from detail page; player candidates=${playerUrls.size}")
 
         return foundLink
+    }
+
+    /**
+     * Renders [pageUrl] in a real Android WebView and captures the stream URL from network
+     * traffic. A WebView uses Chrome's TLS fingerprint, so it passes Cloudflare's bot checks
+     * that block OkHttp-based requests (HTTP 403). Same pattern as the 18EU provider.
+     */
+    @SuppressLint("SetJavaScriptEnabled")
+    private suspend fun extractViaWebView(
+        pageUrl: String,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        val context = runCatching {
+            Class.forName("android.app.ActivityThread")
+                .getMethod("currentApplication")
+                .invoke(null) as? Context
+        }.getOrNull() ?: run {
+            Log.e("XTapes", "WebView fallback: no application context available")
+            return false
+        }
+
+        val capturedUrl = suspendCancellableCoroutine { cont ->
+            Handler(Looper.getMainLooper()).post {
+                val webView = WebView(context).apply {
+                    settings.javaScriptEnabled = true
+                    settings.domStorageEnabled = true
+                    settings.mediaPlaybackRequiresUserGesture = false
+                    settings.userAgentString = browserHeaders.getValue("User-Agent")
+                }
+                webView.webViewClient = object : WebViewClient() {
+                    override fun shouldInterceptRequest(
+                        view: WebView,
+                        request: WebResourceRequest
+                    ): WebResourceResponse? {
+                        val url = request.url.toString()
+                        val isStream = url.contains(".m3u8", ignoreCase = true) ||
+                            url.contains(".mp4", ignoreCase = true)
+                        if (cont.isActive && isStream && !url.contains("ads", ignoreCase = true)) {
+                            cont.resume(url)
+                            view.post { view.destroy() }
+                        }
+                        return super.shouldInterceptRequest(view, request)
+                    }
+
+                    override fun onPageFinished(view: WebView, url: String?) {
+                        // Nudge lazy players to start so the stream request fires.
+                        view.evaluateJavascript(
+                            "(function(){var v=document.querySelector('video');if(v&&v.play){try{v.play()}catch(e){}}var b=document.querySelector('.jw-display-icon-display');if(b){b.click();}})();",
+                            null
+                        )
+                    }
+                }
+                webView.loadUrl(pageUrl)
+                Handler(Looper.getMainLooper()).postDelayed({
+                    if (cont.isActive) {
+                        cont.resume(null)
+                        webView.destroy()
+                    }
+                }, 25_000)
+            }
+        }
+
+        val streamUrl = capturedUrl ?: run {
+            Log.e("XTapes", "WebView fallback: no stream URL captured for $pageUrl")
+            return false
+        }
+        val isHls = streamUrl.contains(".m3u8", ignoreCase = true)
+        callback(
+            newExtractorLink(this.name, "XTapes - WebView", streamUrl, if (isHls) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO) {
+                this.referer = pageUrl
+                this.quality = Qualities.Unknown.value
+                this.headers = mapOf(
+                    "User-Agent" to browserHeaders.getValue("User-Agent"),
+                    "Referer" to pageUrl
+                )
+            }
+        )
+        Log.d("XTapes", "WebView fallback captured: $streamUrl")
+        return true
     }
 
     private fun Element.isAdvertisementFrame(): Boolean {
