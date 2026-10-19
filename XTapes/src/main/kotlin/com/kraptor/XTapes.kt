@@ -420,20 +420,37 @@ class XTapes : MainAPI() {
                 }
                 webView.webViewClient = object : WebViewClient() {
                     override fun onPageFinished(view: WebView, url: String?) {
-                        // Give JS a moment to render iframes, then grab the HTML.
-                        view.postDelayed({
-                            view.evaluateJavascript("document.documentElement.outerHTML") { html ->
-                                if (cont.isActive) {
-                                    // evaluateJavascript returns a JSON-encoded string;
-                                    // decode it to get the raw HTML.
-                                    val decoded = runCatching {
-                                        JSONObject("{\"v\":$html}").getString("v")
-                                    }.getOrNull()
-                                    cont.resume(decoded)
+                        // Cloudflare may show a challenge first; poll until video iframes
+                        // appear (or timeout), then grab the HTML.
+                        val startTime = System.currentTimeMillis()
+                        val maxWait = 20_000L
+                        fun checkForIframes() {
+                            if (!cont.isActive) return
+                            view.evaluateJavascript(
+                                "(function(){var f=document.querySelector('iframe[src*=\'74k.io\'],iframe[src*=\'88z.io\']');return f?'found':'waiting';})()"
+                            ) { result ->
+                                if (!cont.isActive) return@evaluateJavascript
+                                val elapsed = System.currentTimeMillis() - startTime
+                                val found = result?.contains("found") == true
+                                if (found || elapsed >= maxWait) {
+                                    // Iframes found or timeout; grab the full HTML now.
+                                    view.evaluateJavascript("document.documentElement.outerHTML") { html ->
+                                        if (cont.isActive) {
+                                            val decoded = runCatching {
+                                                JSONObject("{\"v\":$html}").getString("v")
+                                            }.getOrNull()
+                                            cont.resume(decoded)
+                                        }
+                                        view.destroy()
+                                    }
+                                } else {
+                                    // Check again in 2 seconds.
+                                    view.postDelayed({ checkForIframes() }, 2000)
                                 }
-                                view.destroy()
                             }
-                        }, 3000)
+                        }
+                        // Start checking after a short initial delay for Cloudflare.
+                        view.postDelayed({ checkForIframes() }, 4000)
                     }
                 }
                 webView.loadUrl(pageUrl)
