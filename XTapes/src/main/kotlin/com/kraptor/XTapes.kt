@@ -39,7 +39,7 @@ class XTapes : MainAPI() {
 
     // These are player hosts that CloudStream's extractor registry can resolve.
     // XTapes may expose them as links instead of iframe elements.
-    private val playerHostHints = listOf("74k.io", "streamtape", "mixdrop", "dood", "bigwarp")
+    private val playerHostHints = listOf("74k.io", "88z.io", "streamtape", "mixdrop", "dood", "bigwarp")
 
     // Entries are kept only where the current route was verified to resolve to that listing.
     override val mainPage = mainPageOf(
@@ -288,6 +288,20 @@ class XTapes : MainAPI() {
         if (!foundLink) {
             for (playerUrl in playerUrls) {
                 if (embed74kBlockedByChallenge && isHostOrSubdomain(playerUrl, "74k.io")) continue
+                // 88z.io is a JS-only embed host with no CloudStream extractor; render it in a
+                // WebView and intercept the .m3u8/.mp4 request directly.
+                if (isHostOrSubdomain(playerUrl, "88z.io")) {
+                    try {
+                        Log.d("XTapes", "Found 88z.io player; extracting via WebView")
+                        if (extractViaWebView(playerUrl, reportLink)) foundLink = true
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        Log.e("XTapes", "Error extracting from 88z.io: ${e.message}")
+                    }
+                    if (foundLink) break
+                    continue
+                }
                 for (referer in extractorReferers) {
                     if (foundLink) break
                     try {
