@@ -195,8 +195,13 @@ class HdPornFull : MainAPI() {
                 val maxWaitMs = 25_000L
                 fun poll() {
                     if (!cont.isActive) return
+                    // Ready ONLY on real content: listing/video articles or a
+                    // player-host link. Never on iframes in general - the
+                    // Cloudflare challenge page itself contains an iframe, and
+                    // v2 grabbed the still-challenged page instantly because
+                    // of that, so the app again showed zero videos.
                     webView.evaluateJavascript(
-                        "(function(){if(document.title.toLowerCase().indexOf('just a moment')>=0){return 'cf';}var a=document.querySelectorAll('article').length;var f=document.querySelectorAll('iframe').length;return (a>=3||f>0)?'ready':'wait';})()"
+                        "(function(){var a=document.querySelectorAll('article').length;var p=document.querySelectorAll(\"a[href*='streamtape'],a[href*='doodstream'],a[href*='lulust'],a[href*='smoothpre'],a[href*='send.now']\").length;return (a>=3||p>0)?'ready':'wait';})()"
                     ) { state ->
                         if (!cont.isActive) return@evaluateJavascript
                         val elapsed = System.currentTimeMillis() - startTime
