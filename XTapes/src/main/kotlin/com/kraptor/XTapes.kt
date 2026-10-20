@@ -301,22 +301,12 @@ class XTapes : MainAPI() {
             } catch (e: Exception) {
                 Log.e("XTapes", "Error extracting from 74k.io: ${e.message}")
             }
-            // FALLBACK: If direct 74k.io extraction failed, load the embed in WebView
-            // and intercept the stream. This ensures the fast 74k.io source appears
-            // even when direct HTTP is blocked.
-            if (!got74kDirectLinks) {
-                try {
-                    Log.d("XTapes", "74k.io direct failed; trying WebView fallback")
-                    if (extractViaWebView(embed74k, reportLink)) {
-                        foundLink = true
-                        Log.d("XTapes", "Got 74k.io stream via WebView")
-                    }
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    Log.e("XTapes", "74k.io WebView fallback failed: ${e.message}")
-                }
-            }
+            // Fast path won: return immediately instead of also running the slow
+            // WebView extractions below (they stacked 20s+ waits after every success).
+            if (got74kDirectLinks) return true
+            // No WebView retry for this embed here: the player loop and the final
+            // main-page WebView below remain as backstops, without stacked waits.
+            Log.d("XTapes", "Direct packed-player extraction produced no links")
         }
 
         // Try every player so the user gets sources from all of them and can pick the fastest.
@@ -335,32 +325,16 @@ class XTapes : MainAPI() {
             }
 
             if (isHostOrSubdomain(playerUrl, "sextapes.to")) {
-                // Already handled by the fast unpack block above when it produced links.
-                if (playerUrl == embed74k && foundLink) continue
-                // Real player (StreamHG). Try the registered extractor first, then a
-                // WebView render of the embed which intercepts the premilkyway.com file.
-                var sextapesFound = false
+                // The fast unpack block above owns the primary embed (it returns
+                // early on success, so reaching here means direct HTTP failed).
+                // Only the registered extractor is tried now; the old WebView retry
+                // duplicated the main-page WebView backstop with another 20s wait.
                 try {
-                    loadExtractor(playerUrl, pageUrl, subtitleCallback) { link ->
-                        if (link.url.isNotBlank()) {
-                            sextapesFound = true
-                            reportLink(link)
-                        }
-                    }
+                    loadExtractor(playerUrl, pageUrl, subtitleCallback, reportLink)
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
                     Log.e("XTapes", "sextapes.to extractor failed: ${e.message}")
-                }
-                if (!sextapesFound) {
-                    try {
-                        Log.d("XTapes", "sextapes.to: trying WebView on embed")
-                        if (extractViaWebView(playerUrl, reportLink)) foundLink = true
-                    } catch (e: CancellationException) {
-                        throw e
-                    } catch (e: Exception) {
-                        Log.e("XTapes", "Error extracting from sextapes.to: ${e.message}")
-                    }
                 }
                 continue
             }
