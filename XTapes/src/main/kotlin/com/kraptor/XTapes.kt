@@ -274,7 +274,9 @@ class XTapes : MainAPI() {
         }).distinct()
         Log.d("XTapes", "Found ${playerUrls.size} player URL candidates")
 
-        val embed74k = playerUrls.firstOrNull { isHostOrSubdomain(it, "74k.io") }
+        // sextapes.to (StreamHG) serves the same packed-player page as 74k.io, so the
+        // direct HTTP unpack below handles both — no slow WebView needed for the main player.
+        val embed74k = playerUrls.firstOrNull { isHostOrSubdomain(it, "74k.io") || isHostOrSubdomain(it, "sextapes.to") }
         var embed74kBlockedByChallenge = false
         if (embed74k != null) {
             var got74kDirectLinks = false
@@ -333,6 +335,8 @@ class XTapes : MainAPI() {
             }
 
             if (isHostOrSubdomain(playerUrl, "sextapes.to")) {
+                // Already handled by the fast unpack block above when it produced links.
+                if (playerUrl == embed74k && foundLink) continue
                 // Real player (StreamHG). Try the registered extractor first, then a
                 // WebView render of the embed which intercepts the premilkyway.com file.
                 var sextapesFound = false
