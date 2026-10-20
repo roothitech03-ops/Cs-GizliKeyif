@@ -459,6 +459,11 @@ class XTapes : MainAPI() {
                 }
                 webView.webViewClient = object : WebViewClient() {
                     override fun onPageFinished(view: WebView, url: String?) {
+                        // Mute any media in the rendered page so no audio leaks.
+                        view.evaluateJavascript(
+                            "document.querySelectorAll('video,audio').forEach(function(e){try{e.muted=true;e.volume=0;e.pause();}catch(x){}});",
+                            null
+                        )
                         view.postDelayed({ poll() }, 3000)
                     }
                 }
@@ -536,9 +541,11 @@ class XTapes : MainAPI() {
                     }
 
                     override fun onPageFinished(view: WebView, url: String?) {
-                        // Nudge lazy players to start so the stream request fires.
+                        // Mute all media (the WebView is hidden; its audio must never play
+                        // in the background), keep muting dynamically added players, then
+                        // nudge the player to start so the stream request fires.
                         view.evaluateJavascript(
-                            "(function(){var v=document.querySelector('video');if(v&&v.play){try{v.play()}catch(e){}}var b=document.querySelector('.jw-display-icon-display');if(b){b.click();}})();",
+                            "(function(){function muteAll(){document.querySelectorAll('video,audio').forEach(function(e){try{e.muted=true;e.volume=0;}catch(x){}});}muteAll();try{new MutationObserver(muteAll).observe(document.documentElement,{childList:true,subtree:true});}catch(x){}var v=document.querySelector('video');if(v&&v.play){try{v.play()}catch(e){}}var b=document.querySelector('.jw-display-icon-display');if(b){b.click();}})();",
                             null
                         )
                     }
