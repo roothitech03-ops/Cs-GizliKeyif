@@ -437,7 +437,7 @@ class XTapes : MainAPI() {
                     if (!cont.isActive) return
                     // Ready when a video iframe (any src/data-src) is present in the DOM.
                     webView.evaluateJavascript(
-                        "(function(){var fs=document.querySelectorAll('iframe');for(var i=0;i<fs.length;i++){var s=(fs[i].getAttribute('src')||'')+(fs[i].getAttribute('data-src')||'');if(s.indexOf('74k.io')>=0||s.indexOf('88z.io')>=0){return 'ready';}}return fs.length>0?'some':'none';})()"
+                        "(function(){var fs=document.querySelectorAll('iframe');for(var i=0;i<fs.length;i++){var s=(fs[i].getAttribute('src')||'')+(fs[i].getAttribute('data-src')||'');if(s.indexOf('74k.io')>=0||s.indexOf('88z.io')>=0||s.indexOf('sextapes.to')>=0){return 'ready';}}return fs.length>0?'some':'none';})()"
                     ) { state ->
                         if (!cont.isActive) return@evaluateJavascript
                         val elapsed = System.currentTimeMillis() - startTime
