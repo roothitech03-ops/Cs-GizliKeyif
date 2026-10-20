@@ -8,6 +8,8 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import org.json.JSONObject
+import org.jsoup.Jsoup
 import com.lagradost.api.Log
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.LoadResponse.Companion.addActors
@@ -39,7 +41,7 @@ class XTapes : MainAPI() {
 
     // These are player hosts that CloudStream's extractor registry can resolve.
     // XTapes may expose them as links instead of iframe elements.
-    private val playerHostHints = listOf("74k.io", "88z.io", "streamtape", "mixdrop", "dood", "bigwarp")
+    private val playerHostHints = listOf("74k.io", "88z.io", "sextapes.to", "streamtape", "mixdrop", "dood", "bigwarp")
 
     // Entries are kept only where the current route was verified to resolve to that listing.
     override val mainPage = mainPageOf(
@@ -212,15 +214,24 @@ class XTapes : MainAPI() {
         val requestedPageUrl = resolveUrl(mainUrl, data) ?: return false
         val response = app.get(requestedPageUrl, headers = browserHeaders, allowRedirects = true)
         val pageUrl = response.url
-        val document = response.document
+        var document = response.document
         // Cloudflare hard-blocks non-browser TLS fingerprints with HTTP 403 (tiny plain-text
         // body) which isSecurityChallenge() cannot detect. A real WebView uses Chrome's TLS
         // stack and passes, so go straight to the WebView fallback when blocked.
         if (response.code == 403 || document.isSecurityChallenge()) {
             val finalHost = runCatching { URI(pageUrl).host }.getOrNull()
             val requestedHost = runCatching { URI(requestedPageUrl).host }.getOrNull()
-            Log.e("XTapes", "Playback page blocked by Cloudflare (HTTP ${response.code}); requested=$requestedHost, final=$finalHost; trying WebView fallback")
-            return extractViaWebView(pageUrl, callback)
+            Log.e("XTapes", "Playback page blocked by Cloudflare (HTTP ${response.code}); requested=$requestedHost, final=$finalHost; rendering via WebView to extract players")
+            // Render the page in a real WebView (passes Cloudflare) and parse the result,
+            // so the 74k.io / 88z.io player iframes are found and extracted normally.
+            val renderedHtml = getRenderedHtmlViaWebView(pageUrl)
+            if (renderedHtml != null) {
+                document = Jsoup.parse(renderedHtml, pageUrl)
+                Log.d("XTapes", "Got rendered HTML via WebView (${renderedHtml.length} chars); continuing extraction")
+            } else {
+                Log.e("XTapes", "Rendered HTML unavailable; using stream interception only")
+                return extractViaWebView(pageUrl, callback)
+            }
         }
         val pageHtml = document.html()
         var foundLink = false
@@ -247,7 +258,12 @@ class XTapes : MainAPI() {
                 .filterNot { it.isBlank() || it.startsWith("javascript:", ignoreCase = true) }
                 .mapNotNull { resolveUrl(pageUrl, it) }
                 .firstOrNull()
-            iframeUrl?.takeUnless { iframe.isAdvertisementFrame() || isIgnoredIframe(it) }
+            iframeUrl?.takeUnless {
+                isIgnoredIframe(it) ||
+                    // Never drop a known player host as an "ad": the video iframes on this
+                    // site live inside ad-heavy containers and can carry ad-like attributes.
+                    (!isKnownPlayerHost(it) && iframe.isAdvertisementFrame())
+            }
         }.distinct()
 
         // Some versions expose the player as a provider anchor, not an iframe.
@@ -261,59 +277,106 @@ class XTapes : MainAPI() {
         val embed74k = playerUrls.firstOrNull { isHostOrSubdomain(it, "74k.io") }
         var embed74kBlockedByChallenge = false
         if (embed74k != null) {
+            var got74kDirectLinks = false
             try {
                 Log.d("XTapes", "Found 74k.io player host: ${URI(embed74k).host}")
                 val embedDocument = app.get(embed74k, referer = pageUrl, headers = browserHeaders).document
                 val embedBlockedByChallenge = embedDocument.isSecurityChallenge()
                 if (embedBlockedByChallenge) {
                     embed74kBlockedByChallenge = true
-                    Log.e("XTapes", "74k.io returned a security challenge; stopping that extraction path")
+                    Log.e("XTapes", "74k.io returned a security challenge; trying WebView fallback")
                 }
                 val links = if (embedBlockedByChallenge) null else {
                     extract74kLinks(embedDocument.html(), embed74k)
                 }
                 if (links != null) {
-                    links.hls4?.let { addHlsLink("XTapes - HLS4", it, embed74k, reportLink) }
-                    links.hls2?.let { addHlsLink("XTapes - HLS2", it, embed74k, reportLink) }
-                    links.hls3?.let { addHlsLink("XTapes - HLS3", it, embed74k, reportLink) }
+                    links.hls4?.let { addHlsLink("XTapes - HLS4", it, embed74k, reportLink); got74kDirectLinks = true }
+                    links.hls2?.let { addHlsLink("XTapes - HLS2", it, embed74k, reportLink); got74kDirectLinks = true }
+                    links.hls3?.let { addHlsLink("XTapes - HLS3", it, embed74k, reportLink); got74kDirectLinks = true }
                 }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 Log.e("XTapes", "Error extracting from 74k.io: ${e.message}")
             }
+            // FALLBACK: If direct 74k.io extraction failed, load the embed in WebView
+            // and intercept the stream. This ensures the fast 74k.io source appears
+            // even when direct HTTP is blocked.
+            if (!got74kDirectLinks) {
+                try {
+                    Log.d("XTapes", "74k.io direct failed; trying WebView fallback")
+                    if (extractViaWebView(embed74k, reportLink)) {
+                        foundLink = true
+                        Log.d("XTapes", "Got 74k.io stream via WebView")
+                    }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.e("XTapes", "74k.io WebView fallback failed: ${e.message}")
+                }
+            }
         }
 
-        // Always observe whether loadExtractor actually invokes the callback; its return value is not a link count.
-        if (!foundLink) {
-            for (playerUrl in playerUrls) {
-                if (embed74kBlockedByChallenge && isHostOrSubdomain(playerUrl, "74k.io")) continue
-                // 88z.io is a JS-only embed host with no CloudStream extractor; render it in a
-                // WebView and intercept the .m3u8/.mp4 request directly.
-                if (isHostOrSubdomain(playerUrl, "88z.io")) {
+        // Try every player so the user gets sources from all of them and can pick the fastest.
+        for (playerUrl in playerUrls) {
+            if (embed74kBlockedByChallenge && isHostOrSubdomain(playerUrl, "74k.io")) continue
+            if (isHostOrSubdomain(playerUrl, "88z.io")) {
+                try {
+                    Log.d("XTapes", "Found 88z.io player; extracting via WebView")
+                    if (extractViaWebView(playerUrl, reportLink)) foundLink = true
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.e("XTapes", "Error extracting from 88z.io: ${e.message}")
+                }
+                continue
+            }
+
+            if (isHostOrSubdomain(playerUrl, "sextapes.to")) {
+                // Real player (StreamHG). Try the registered extractor first, then a
+                // WebView render of the embed which intercepts the premilkyway.com file.
+                var sextapesFound = false
+                try {
+                    loadExtractor(playerUrl, pageUrl, subtitleCallback) { link ->
+                        if (link.url.isNotBlank()) {
+                            sextapesFound = true
+                            reportLink(link)
+                        }
+                    }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.e("XTapes", "sextapes.to extractor failed: ${e.message}")
+                }
+                if (!sextapesFound) {
                     try {
-                        Log.d("XTapes", "Found 88z.io player; extracting via WebView")
+                        Log.d("XTapes", "sextapes.to: trying WebView on embed")
                         if (extractViaWebView(playerUrl, reportLink)) foundLink = true
                     } catch (e: CancellationException) {
                         throw e
                     } catch (e: Exception) {
-                        Log.e("XTapes", "Error extracting from 88z.io: ${e.message}")
-                    }
-                    if (foundLink) break
-                    continue
-                }
-                for (referer in extractorReferers) {
-                    if (foundLink) break
-                    try {
-                        loadExtractor(playerUrl, referer, subtitleCallback, reportLink)
-                    } catch (e: CancellationException) {
-                        throw e
-                    } catch (e: Exception) {
-                        val host = try { URI(playerUrl).host } catch (_: Exception) { "unknown" }
-                        Log.e("XTapes", "Error loading extractor for $host: ${e.message}")
+                        Log.e("XTapes", "Error extracting from sextapes.to: ${e.message}")
                     }
                 }
-                if (foundLink) break
+                continue
+            }
+            var playerFoundLink = false
+            val playerReportLink: (ExtractorLink) -> Unit = { link ->
+                if (link.url.isNotBlank()) {
+                    playerFoundLink = true
+                    reportLink(link)
+                }
+            }
+            for (referer in extractorReferers) {
+                if (playerFoundLink) break
+                try {
+                    loadExtractor(playerUrl, referer, subtitleCallback, playerReportLink)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    val host = try { URI(playerUrl).host } catch (_: Exception) { "unknown" }
+                    Log.e("XTapes", "Error loading extractor for $host: ${e.message}")
+                }
             }
         }
 
@@ -362,6 +425,71 @@ class XTapes : MainAPI() {
      * that block OkHttp-based requests (HTTP 403). Same pattern as the 18EU provider.
      */
     @SuppressLint("SetJavaScriptEnabled")
+    /**
+     * Renders a Cloudflare-blocked page in a real WebView and returns its HTML once the
+     * video iframes have appeared. Returns null on timeout/failure.
+     */
+    private suspend fun getRenderedHtmlViaWebView(pageUrl: String): String? {
+        val context = runCatching {
+            Class.forName("android.app.ActivityThread")
+                .getMethod("currentApplication")
+                .invoke(null) as? Context
+        }.getOrNull() ?: return null
+
+        return suspendCancellableCoroutine { cont ->
+            Handler(Looper.getMainLooper()).post {
+                val webView = WebView(context).apply {
+                    settings.javaScriptEnabled = true
+                    settings.domStorageEnabled = true
+                    settings.userAgentString = browserHeaders.getValue("User-Agent")
+                }
+                val startTime = System.currentTimeMillis()
+                val maxWaitMs = 25_000L
+                fun poll() {
+                    if (!cont.isActive) return
+                    // Ready when a video iframe (any src/data-src) is present in the DOM.
+                    webView.evaluateJavascript(
+                        "(function(){var fs=document.querySelectorAll('iframe');for(var i=0;i<fs.length;i++){var s=(fs[i].getAttribute('src')||'')+(fs[i].getAttribute('data-src')||'');if(s.indexOf('74k.io')>=0||s.indexOf('88z.io')>=0||s.indexOf('sextapes.to')>=0){return 'ready';}}return fs.length>0?'some':'none';})()"
+                    ) { state ->
+                        if (!cont.isActive) return@evaluateJavascript
+                        val elapsed = System.currentTimeMillis() - startTime
+                        val ready = state?.contains("ready") == true
+                        if (ready || elapsed >= maxWaitMs) {
+                            webView.evaluateJavascript("document.documentElement.outerHTML") { html ->
+                                if (cont.isActive) {
+                                    val decoded = runCatching {
+                                        JSONObject("{\"v\":$html}").getString("v")
+                                    }.getOrNull()
+                                    cont.resume(decoded)
+                                }
+                                webView.destroy()
+                            }
+                        } else {
+                            webView.postDelayed({ poll() }, 2000)
+                        }
+                    }
+                }
+                webView.webViewClient = object : WebViewClient() {
+                    override fun onPageFinished(view: WebView, url: String?) {
+                        // Mute any media in the rendered page so no audio leaks.
+                        view.evaluateJavascript(
+                            "document.querySelectorAll('video,audio').forEach(function(e){try{e.muted=true;e.volume=0;}catch(x){}});",
+                            null
+                        )
+                        view.postDelayed({ poll() }, 3000)
+                    }
+                }
+                webView.loadUrl(pageUrl)
+                Handler(Looper.getMainLooper()).postDelayed({
+                    if (cont.isActive) {
+                        cont.resume(null)
+                        webView.destroy()
+                    }
+                }, maxWaitMs + 5000)
+            }
+        }
+    }
+
     private suspend fun extractViaWebView(
         pageUrl: String,
         callback: (ExtractorLink) -> Unit
@@ -391,7 +519,24 @@ class XTapes : MainAPI() {
                         val url = request.url.toString()
                         val isStream = url.contains(".m3u8", ignoreCase = true) ||
                             url.contains(".mp4", ignoreCase = true)
-                        if (cont.isActive && isStream && !url.contains("ads", ignoreCase = true)) {
+                        // Reject only streams from clear ad networks; accept everything
+                        // else (an earlier strict whitelist rejected real videos too).
+                        val lowerUrl = url.lowercase()
+                        val isAdNetwork = lowerUrl.contains("izerv") ||
+                            lowerUrl.contains("doubleclick") ||
+                            lowerUrl.contains("googlesyndication") ||
+                            lowerUrl.contains("googleads") ||
+                            lowerUrl.contains("imasdk") ||
+                            lowerUrl.contains("redirectthisclick") ||
+                            lowerUrl.contains("exoclick") ||
+                            lowerUrl.contains("adnxs") ||
+                            lowerUrl.contains("pubmatic") ||
+                            lowerUrl.contains("rubicon") ||
+                            lowerUrl.contains("criteo") ||
+                            lowerUrl.contains("outbrain") ||
+                            lowerUrl.contains("taboola")
+                        val accept = !isAdNetwork
+                        if (cont.isActive && isStream && accept) {
                             cont.resume(url)
                             view.post { view.destroy() }
                         }
@@ -399,9 +544,11 @@ class XTapes : MainAPI() {
                     }
 
                     override fun onPageFinished(view: WebView, url: String?) {
-                        // Nudge lazy players to start so the stream request fires.
+                        // Mute all media (the WebView is hidden; its audio must never play
+                        // in the background), keep muting dynamically added players, then
+                        // nudge the player to start so the stream request fires.
                         view.evaluateJavascript(
-                            "(function(){var v=document.querySelector('video');if(v&&v.play){try{v.play()}catch(e){}}var b=document.querySelector('.jw-display-icon-display');if(b){b.click();}})();",
+                            "(function(){function muteAll(){document.querySelectorAll('video,audio').forEach(function(e){try{e.muted=true;e.volume=0;}catch(x){}});}muteAll();try{new MutationObserver(muteAll).observe(document.documentElement,{childList:true,subtree:true});}catch(x){}var v=document.querySelector('video');if(v&&v.play){try{v.play()}catch(e){}}var b=document.querySelector('.jw-display-icon-display');if(b){b.click();}})();",
                             null
                         )
                     }
