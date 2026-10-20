@@ -1893,7 +1893,7 @@
     {
         "url": "https://raw.githubusercontent.com/roothitech03-ops/Cs-GizliKeyif/builds/XTapes.cs3",
         "status": 1,
-        "version": 6,
+        "version": 7,
         "name": "XTapes",
         "internalName": "XTapes",
         "authors": [
@@ -1908,7 +1908,7 @@
         ],
         "iconUrl": "https://t3.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://xtapes.tw&size=48",
         "apiVersion": 1,
-        "fileHash": "sha256-c33cb122cb7c730a3b809b35b3bd4feec4ea2d394e010a34641fe026370769c5"
+        "fileHash": "sha256-86cd4b63e32fc43f3814c3d36f9946e5dd9ccc1fe8ae23ca56b25eb75df88c49"
     },
     {
         "url": "https://raw.githubusercontent.com/roothitech03-ops/Cs-GizliKeyif/builds/xVideos.cs3",
