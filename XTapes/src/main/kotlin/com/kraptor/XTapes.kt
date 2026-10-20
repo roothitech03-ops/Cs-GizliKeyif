@@ -451,13 +451,17 @@ class XTapes : MainAPI() {
                 val maxWaitMs = 25_000L
                 fun poll() {
                     if (!cont.isActive) return
-                    // Ready when a video iframe (any src/data-src) is present in the DOM.
+                    // Ready only when the FAST player iframe (sextapes.to / 74k.io) is in
+                    // the DOM. The slow 88z.io iframe loads first; grabbing the HTML then
+                    // missed the fast player entirely, leaving only the WebView source.
                     webView.evaluateJavascript(
-                        "(function(){var fs=document.querySelectorAll('iframe');for(var i=0;i<fs.length;i++){var s=(fs[i].getAttribute('src')||'')+(fs[i].getAttribute('data-src')||'');if(s.indexOf('74k.io')>=0||s.indexOf('88z.io')>=0||s.indexOf('sextapes.to')>=0){return 'ready';}}return fs.length>0?'some':'none';})()"
+                        "(function(){var fs=document.querySelectorAll('iframe');var slow=false;for(var i=0;i<fs.length;i++){var s=(fs[i].getAttribute('src')||'')+(fs[i].getAttribute('data-src')||'');if(s.indexOf('sextapes.to')>=0||s.indexOf('74k.io')>=0){return 'ready';}if(s.indexOf('88z.io')>=0){slow=true;}}return slow?'slow':(fs.length>0?'some':'none');})()"
                     ) { state ->
                         if (!cont.isActive) return@evaluateJavascript
                         val elapsed = System.currentTimeMillis() - startTime
-                        val ready = state?.contains("ready") == true
+                        // Only-88z pages are accepted after 12s so they don't wait forever.
+                        val ready = state?.contains("ready") == true ||
+                            (state?.contains("slow") == true && elapsed >= 12_000)
                         if (ready || elapsed >= maxWaitMs) {
                             webView.evaluateJavascript("document.documentElement.outerHTML") { html ->
                                 if (cont.isActive) {
