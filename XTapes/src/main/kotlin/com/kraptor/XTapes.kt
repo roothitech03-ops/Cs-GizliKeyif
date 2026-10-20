@@ -41,7 +41,7 @@ class XTapes : MainAPI() {
 
     // These are player hosts that CloudStream's extractor registry can resolve.
     // XTapes may expose them as links instead of iframe elements.
-    private val playerHostHints = listOf("74k.io", "sextapes.to", "streamtape", "mixdrop", "dood", "bigwarp")
+    private val playerHostHints = listOf("74k.io", "88z.io", "sextapes.to", "streamtape", "mixdrop", "dood", "bigwarp")
 
     // Entries are kept only where the current route was verified to resolve to that listing.
     override val mainPage = mainPageOf(
@@ -320,6 +320,18 @@ class XTapes : MainAPI() {
         // Try every player so the user gets sources from all of them and can pick the fastest.
         for (playerUrl in playerUrls) {
             if (embed74kBlockedByChallenge && isHostOrSubdomain(playerUrl, "74k.io")) continue
+            if (isHostOrSubdomain(playerUrl, "88z.io")) {
+                try {
+                    Log.d("XTapes", "Found 88z.io player; extracting via WebView")
+                    if (extractViaWebView(playerUrl, reportLink)) foundLink = true
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.e("XTapes", "Error extracting from 88z.io: ${e.message}")
+                }
+                continue
+            }
+
             if (isHostOrSubdomain(playerUrl, "sextapes.to")) {
                 // Real player (StreamHG). Try the registered extractor first, then a
                 // WebView render of the embed which intercepts the premilkyway.com file.
@@ -461,7 +473,7 @@ class XTapes : MainAPI() {
                     override fun onPageFinished(view: WebView, url: String?) {
                         // Mute any media in the rendered page so no audio leaks.
                         view.evaluateJavascript(
-                            "document.querySelectorAll('video,audio').forEach(function(e){try{e.muted=true;e.volume=0;e.pause();}catch(x){}});",
+                            "document.querySelectorAll('video,audio').forEach(function(e){try{e.muted=true;e.volume=0;}catch(x){}});",
                             null
                         )
                         view.postDelayed({ poll() }, 3000)
@@ -507,12 +519,9 @@ class XTapes : MainAPI() {
                         val url = request.url.toString()
                         val isStream = url.contains(".m3u8", ignoreCase = true) ||
                             url.contains(".mp4", ignoreCase = true)
-                        // STRICT: only accept real video streams, never ads.
-                        // Real video on this site comes from the StreamHG CDN (premilkyway.com)
-                        // or as HLS (.m3u8). Video ads come from IMA/ad-networks as .mp4.
+                        // Reject only streams from clear ad networks; accept everything
+                        // else (an earlier strict whitelist rejected real videos too).
                         val lowerUrl = url.lowercase()
-                        val isHls = lowerUrl.contains(".m3u8")
-                        val isKnownVideoCdn = lowerUrl.contains("premilkyway.com")
                         val isAdNetwork = lowerUrl.contains("izerv") ||
                             lowerUrl.contains("doubleclick") ||
                             lowerUrl.contains("googlesyndication") ||
@@ -525,14 +534,8 @@ class XTapes : MainAPI() {
                             lowerUrl.contains("rubicon") ||
                             lowerUrl.contains("criteo") ||
                             lowerUrl.contains("outbrain") ||
-                            lowerUrl.contains("taboola") ||
-                            lowerUrl.contains("preroll") ||
-                            lowerUrl.contains("midroll") ||
-                            lowerUrl.contains("vast") ||
-                            lowerUrl.contains("vpaid")
-                        // Accept: known video CDN, or HLS from non-ad source.
-                        // Reject: everything from ad networks, and .mp4 from unknown hosts (likely ads).
-                        val accept = isKnownVideoCdn || (isHls && !isAdNetwork)
+                            lowerUrl.contains("taboola")
+                        val accept = !isAdNetwork
                         if (cont.isActive && isStream && accept) {
                             cont.resume(url)
                             view.post { view.destroy() }
@@ -588,9 +591,7 @@ class XTapes : MainAPI() {
     }
 
     private fun isIgnoredIframe(url: String): Boolean = listOf(
-        "recaptcha", "twitter", "izerv", "timbuk", "facebook.com/plugins", "platform.twitter.com",
-        // 88z.io is a fake-player ad wrapper on this site, not a real video source.
-        "88z.io"
+        "recaptcha", "twitter", "izerv", "timbuk", "facebook.com/plugins", "platform.twitter.com"
     ).any { url.contains(it, ignoreCase = true) }
 
     private fun isHostOrSubdomain(url: String, host: String): Boolean {
