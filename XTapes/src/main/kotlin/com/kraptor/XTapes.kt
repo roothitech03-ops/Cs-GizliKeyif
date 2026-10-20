@@ -8,6 +8,8 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import org.json.JSONObject
+import org.jsoup.Jsoup
 import com.lagradost.api.Log
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.LoadResponse.Companion.addActors
@@ -212,15 +214,24 @@ class XTapes : MainAPI() {
         val requestedPageUrl = resolveUrl(mainUrl, data) ?: return false
         val response = app.get(requestedPageUrl, headers = browserHeaders, allowRedirects = true)
         val pageUrl = response.url
-        val document = response.document
+        var document = response.document
         // Cloudflare hard-blocks non-browser TLS fingerprints with HTTP 403 (tiny plain-text
         // body) which isSecurityChallenge() cannot detect. A real WebView uses Chrome's TLS
         // stack and passes, so go straight to the WebView fallback when blocked.
         if (response.code == 403 || document.isSecurityChallenge()) {
             val finalHost = runCatching { URI(pageUrl).host }.getOrNull()
             val requestedHost = runCatching { URI(requestedPageUrl).host }.getOrNull()
-            Log.e("XTapes", "Playback page blocked by Cloudflare (HTTP ${response.code}); requested=$requestedHost, final=$finalHost; trying WebView fallback")
-            return extractViaWebView(pageUrl, callback)
+            Log.e("XTapes", "Playback page blocked by Cloudflare (HTTP ${response.code}); requested=$requestedHost, final=$finalHost; rendering via WebView to extract players")
+            // Render the page in a real WebView (passes Cloudflare) and parse the result,
+            // so the 74k.io / 88z.io player iframes are found and extracted normally.
+            val renderedHtml = getRenderedHtmlViaWebView(pageUrl)
+            if (renderedHtml != null) {
+                document = Jsoup.parse(renderedHtml, pageUrl)
+                Log.d("XTapes", "Got rendered HTML via WebView (${renderedHtml.length} chars); continuing extraction")
+            } else {
+                Log.e("XTapes", "Rendered HTML unavailable; using stream interception only")
+                return extractViaWebView(pageUrl, callback)
+            }
         }
         val pageHtml = document.html()
         var foundLink = false
@@ -247,7 +258,12 @@ class XTapes : MainAPI() {
                 .filterNot { it.isBlank() || it.startsWith("javascript:", ignoreCase = true) }
                 .mapNotNull { resolveUrl(pageUrl, it) }
                 .firstOrNull()
-            iframeUrl?.takeUnless { iframe.isAdvertisementFrame() || isIgnoredIframe(it) }
+            iframeUrl?.takeUnless {
+                isIgnoredIframe(it) ||
+                    // Never drop a known player host as an "ad": the video iframes on this
+                    // site live inside ad-heavy containers and can carry ad-like attributes.
+                    (!isKnownPlayerHost(it) && iframe.isAdvertisementFrame())
+            }
         }.distinct()
 
         // Some versions expose the player as a provider anchor, not an iframe.
@@ -380,6 +396,66 @@ class XTapes : MainAPI() {
      * that block OkHttp-based requests (HTTP 403). Same pattern as the 18EU provider.
      */
     @SuppressLint("SetJavaScriptEnabled")
+    /**
+     * Renders a Cloudflare-blocked page in a real WebView and returns its HTML once the
+     * video iframes have appeared. Returns null on timeout/failure.
+     */
+    private suspend fun getRenderedHtmlViaWebView(pageUrl: String): String? {
+        val context = runCatching {
+            Class.forName("android.app.ActivityThread")
+                .getMethod("currentApplication")
+                .invoke(null) as? Context
+        }.getOrNull() ?: return null
+
+        return suspendCancellableCoroutine { cont ->
+            Handler(Looper.getMainLooper()).post {
+                val webView = WebView(context).apply {
+                    settings.javaScriptEnabled = true
+                    settings.domStorageEnabled = true
+                    settings.userAgentString = browserHeaders.getValue("User-Agent")
+                }
+                val startTime = System.currentTimeMillis()
+                val maxWaitMs = 25_000L
+                fun poll() {
+                    if (!cont.isActive) return
+                    // Ready when a video iframe (any src/data-src) is present in the DOM.
+                    webView.evaluateJavascript(
+                        "(function(){var fs=document.querySelectorAll('iframe');for(var i=0;i<fs.length;i++){var s=(fs[i].getAttribute('src')||'')+(fs[i].getAttribute('data-src')||'');if(s.indexOf('74k.io')>=0||s.indexOf('88z.io')>=0){return 'ready';}}return fs.length>0?'some':'none';})()"
+                    ) { state ->
+                        if (!cont.isActive) return@evaluateJavascript
+                        val elapsed = System.currentTimeMillis() - startTime
+                        val ready = state?.contains("ready") == true
+                        if (ready || elapsed >= maxWaitMs) {
+                            webView.evaluateJavascript("document.documentElement.outerHTML") { html ->
+                                if (cont.isActive) {
+                                    val decoded = runCatching {
+                                        JSONObject("{\"v\":$html}").getString("v")
+                                    }.getOrNull()
+                                    cont.resume(decoded)
+                                }
+                                webView.destroy()
+                            }
+                        } else {
+                            webView.postDelayed({ poll() }, 2000)
+                        }
+                    }
+                }
+                webView.webViewClient = object : WebViewClient() {
+                    override fun onPageFinished(view: WebView, url: String?) {
+                        view.postDelayed({ poll() }, 3000)
+                    }
+                }
+                webView.loadUrl(pageUrl)
+                Handler(Looper.getMainLooper()).postDelayed({
+                    if (cont.isActive) {
+                        cont.resume(null)
+                        webView.destroy()
+                    }
+                }, maxWaitMs + 5000)
+            }
+        }
+    }
+
     private suspend fun extractViaWebView(
         pageUrl: String,
         callback: (ExtractorLink) -> Unit
