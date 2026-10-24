@@ -6,6 +6,8 @@ import android.os.Handler
 import android.os.Looper
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.webkit.WebResourceRequest
+import android.webkit.WebResourceError
 import org.json.JSONObject
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
