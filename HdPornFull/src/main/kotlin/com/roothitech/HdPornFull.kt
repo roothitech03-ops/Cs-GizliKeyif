@@ -97,7 +97,7 @@ class HdPornFull : MainAPI() {
             img?.attr("data-original"),
             img?.attr("data-lazy-src"),
             img?.attr("src")
-        ).firstOrNull { it.isNotBlank() && !it.startsWith("data:image", ignoreCase = true) }
+        ).firstOrNull { it?.isNotBlank() == true && !it!!.startsWith("data:image", ignoreCase = true) }
             ?.substringBefore(",")?.substringBefore(" ")
 
         return newMovieSearchResponse(title.trim(), href, TvType.NSFW) {
