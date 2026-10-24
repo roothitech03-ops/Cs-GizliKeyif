@@ -45,23 +45,33 @@ class HdPornFull(private val activity: android.app.Activity) : MainAPI() {
         private var persistentWebView: WebView? = null
         private var isSessionReady = false
         private var initLock: Any? = null
+        
+        // These will be set by the first instance
+        private var savedUserAgent: String? = null
+        private var savedContext: Context? = null
     }
 
     private fun ensurePersistentWebView(): WebView {
-        return persistentWebView ?: synchronized(this) {
-            persistentWebView ?: WebView(activity.applicationContext).apply {
-                settings.javaScriptEnabled = true
-                settings.domStorageEnabled = true
-                settings.userAgentString = browserHeaders.getValue("User-Agent")
-                settings.loadsImagesAutomatically = true
-                settings.blockNetworkLoads = false
-                settings.setSupportZoom(true)
-                settings.builtInZoomControls = true
-                settings.displayZoomControls = false
-                // Enable cookie persistence
-                CookieManager.getInstance().setAcceptCookie(true)
-                CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
-            }.also { persistentWebView = it }
+        return companion.persistentWebView ?: synchronized(companion) {
+            companion.persistentWebView ?: run {
+                // Initialize static fields from this instance if not set
+                if (companion.savedUserAgent == null) companion.savedUserAgent = browserHeaders.getValue("User-Agent")
+                if (companion.savedContext == null) companion.savedContext = activity.applicationContext
+                
+                WebView(companion.savedContext!!).apply {
+                    settings.javaScriptEnabled = true
+                    settings.domStorageEnabled = true
+                    settings.userAgentString = companion.savedUserAgent!!
+                    settings.loadsImagesAutomatically = true
+                    settings.blockNetworkLoads = false
+                    settings.setSupportZoom(true)
+                    settings.builtInZoomControls = true
+                    settings.displayZoomControls = false
+                    // Enable cookie persistence
+                    CookieManager.getInstance().setAcceptCookie(true)
+                    CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
+                }.also { companion.persistentWebView = it }
+            }
         }
     }
 
@@ -117,7 +127,7 @@ class HdPornFull(private val activity: android.app.Activity) : MainAPI() {
         }
 
         // 2. Try persistent WebView (headless) - reuses session/cookies
-        if (isSessionReady) {
+        if (companion.isSessionReady) {
             Log.d("HdPornFull", "Using persistent WebView session for $url")
             val html = getRenderedHtmlViaPersistentWebView(url, webView)
             if (html != null) {
@@ -132,7 +142,7 @@ class HdPornFull(private val activity: android.app.Activity) : MainAPI() {
         }
 
         // 3. Only show manual dialog ONCE per session
-        if (!isSessionReady) {
+        if (!companion.isSessionReady) {
             Log.d("HdPornFull", "Session not ready - showing manual bypass dialog for $url")
             val html = showManualBypassDialog(url, webView) ?: return null
             val manualDoc = runCatching { Jsoup.parse(html, url) }.getOrNull()
@@ -141,7 +151,7 @@ class HdPornFull(private val activity: android.app.Activity) : MainAPI() {
                 val isUsable = usable(manualDoc)
                 Log.d("HdPornFull", "Manual bypass result for $url: challenge=$isChallenge, usable=$isUsable, title='${manualDoc.title()}'")
                 if (!isChallenge && isUsable) {
-                    isSessionReady = true // Mark session ready - no more dialogs!
+                    companion.isSessionReady = true // Mark session ready - no more dialogs!
                     Log.d("HdPornFull", "Cloudflare session established - future requests will use persistent WebView")
                     return manualDoc
                 }
