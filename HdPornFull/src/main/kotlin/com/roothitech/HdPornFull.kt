@@ -114,10 +114,10 @@ class HdPornFull : MainAPI() {
         val document = fetchDocument(url) { it.selectFirst("h1") != null } ?: return null
         val title = document.selectFirst("main article h1")?.text()?.trim()
             ?: document.selectFirst("h1")?.text()?.trim()
-            ?: document.selectFirst("meta[property=og:title]")?.attr("content")?.trim()
-            ?: return null
+            ?: document.selectFirst("meta[property='og:title']")?.attr("content")?.trim()
+            ?: "Untitled"
         return newMovieLoadResponse(title, url, TvType.NSFW, url) {
-            posterUrl = fixUrlNull(document.selectFirst("meta[property=og:image]")?.attr("content"))
+            posterUrl = fixUrlNull(document.selectFirst("meta[property='og:image']")?.attr("content"))
             // The page has no prose description; its h4 block carries the
             // release info (file name, size, duration, codec).
             plot = document.selectFirst("main article h4")?.text()?.trim()
