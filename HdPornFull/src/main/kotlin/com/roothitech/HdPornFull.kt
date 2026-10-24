@@ -49,19 +49,29 @@ class HdPornFull(private val activity: android.app.Activity) : MainAPI() {
         // These will be set by the first instance
         private var savedUserAgent: String? = null
         private var savedContext: Context? = null
+        
+        // Public accessors for instance methods
+        fun getPersistentWebView(): WebView? = persistentWebView
+        fun setPersistentWebView(webView: WebView) { persistentWebView = webView }
+        fun getIsSessionReady(): Boolean = isSessionReady
+        fun setIsSessionReady(ready: Boolean) { isSessionReady = ready }
+        fun getSavedUserAgent(): String? = savedUserAgent
+        fun setSavedUserAgent(ua: String) { savedUserAgent = ua }
+        fun getSavedContext(): Context? = savedContext
+        fun setSavedContext(ctx: Context) { savedContext = ctx }
     }
 
     private fun ensurePersistentWebView(): WebView {
-        return companion.persistentWebView ?: synchronized(companion) {
-            companion.persistentWebView ?: run {
+        return HdPornFull.getPersistentWebView() ?: synchronized(HdPornFull::class) {
+            HdPornFull.getPersistentWebView() ?: run {
                 // Initialize static fields from this instance if not set
-                if (companion.savedUserAgent == null) companion.savedUserAgent = browserHeaders.getValue("User-Agent")
-                if (companion.savedContext == null) companion.savedContext = activity.applicationContext
+                if (HdPornFull.getSavedUserAgent() == null) HdPornFull.setSavedUserAgent(browserHeaders.getValue("User-Agent"))
+                if (HdPornFull.getSavedContext() == null) HdPornFull.setSavedContext(activity.applicationContext)
                 
-                WebView(companion.savedContext!!).apply {
+                WebView(HdPornFull.getSavedContext()!!).apply {
                     settings.javaScriptEnabled = true
                     settings.domStorageEnabled = true
-                    settings.userAgentString = companion.savedUserAgent!!
+                    settings.userAgentString = HdPornFull.getSavedUserAgent()!!
                     settings.loadsImagesAutomatically = true
                     settings.blockNetworkLoads = false
                     settings.setSupportZoom(true)
@@ -70,7 +80,7 @@ class HdPornFull(private val activity: android.app.Activity) : MainAPI() {
                     // Enable cookie persistence
                     CookieManager.getInstance().setAcceptCookie(true)
                     CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
-                }.also { companion.persistentWebView = it }
+                }.also { HdPornFull.setPersistentWebView(it) }
             }
         }
     }
@@ -127,7 +137,7 @@ class HdPornFull(private val activity: android.app.Activity) : MainAPI() {
         }
 
         // 2. Try persistent WebView (headless) - reuses session/cookies
-        if (companion.isSessionReady) {
+        if (HdPornFull.getIsSessionReady()) {
             Log.d("HdPornFull", "Using persistent WebView session for $url")
             val html = getRenderedHtmlViaPersistentWebView(url, webView)
             if (html != null) {
@@ -142,7 +152,7 @@ class HdPornFull(private val activity: android.app.Activity) : MainAPI() {
         }
 
         // 3. Only show manual dialog ONCE per session
-        if (!companion.isSessionReady) {
+        if (!HdPornFull.getIsSessionReady()) {
             Log.d("HdPornFull", "Session not ready - showing manual bypass dialog for $url")
             val html = showManualBypassDialog(url, webView) ?: return null
             val manualDoc = runCatching { Jsoup.parse(html, url) }.getOrNull()
@@ -151,7 +161,7 @@ class HdPornFull(private val activity: android.app.Activity) : MainAPI() {
                 val isUsable = usable(manualDoc)
                 Log.d("HdPornFull", "Manual bypass result for $url: challenge=$isChallenge, usable=$isUsable, title='${manualDoc.title()}'")
                 if (!isChallenge && isUsable) {
-                    companion.isSessionReady = true // Mark session ready - no more dialogs!
+                    HdPornFull.setIsSessionReady(true) // Mark session ready - no more dialogs!
                     Log.d("HdPornFull", "Cloudflare session established - future requests will use persistent WebView")
                     return manualDoc
                 }
