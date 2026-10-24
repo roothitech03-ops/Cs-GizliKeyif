@@ -11,6 +11,8 @@ import android.webkit.WebViewClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceError
 import android.webkit.WebChromeClient
+import android.webkit.CookieManager
+import android.webkit.ValueCallback
 import android.widget.FrameLayout
 import org.json.JSONObject
 import org.jsoup.Jsoup
@@ -37,6 +39,38 @@ class HdPornFull(private val activity: android.app.Activity) : MainAPI() {
         "Accept-Language" to "en-US,en;q=0.9"
     )
 
+    // Persistent WebView & cookies - survives across fetchDocument calls
+    companion object {
+        @SuppressLint("StaticFieldLeak")
+        private var persistentWebView: WebView? = null
+        private var isSessionReady = false
+        private var initLock: Any? = null
+    }
+
+    private fun ensurePersistentWebView(): WebView {
+        return persistentWebView ?: synchronized(this) {
+            persistentWebView ?: WebView(activity.applicationContext).apply {
+                settings.javaScriptEnabled = true
+                settings.domStorageEnabled = true
+                settings.userAgentString = browserHeaders.getValue("User-Agent")
+                settings.loadsImagesAutomatically = true
+                settings.blockNetworkLoads = false
+                settings.setSupportZoom(true)
+                settings.builtInZoomControls = true
+                settings.displayZoomControls = false
+                // Enable cookie persistence
+                CookieManager.getInstance().setAcceptCookie(true)
+                CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
+            }.also { persistentWebView = it }
+        }
+    }
+
+    private fun syncCookiesToWebView(webView: WebView) {
+        // Cookies are automatically shared via CookieManager when using same context
+        // Force sync for current URL
+        CookieManager.getInstance().flush()
+    }
+
     // Verified on the site: cat=110 is the "Latest Porn Movies" listing
     override val mainPage = mainPageOf(
         "$mainUrl/?filter=latest" to "Latest Porn Videos",
@@ -52,25 +86,148 @@ class HdPornFull(private val activity: android.app.Activity) : MainAPI() {
             text().contains("cf_chl_", ignoreCase = true)
 
     /**
-     * Fetches [url] over HTTP first. If the response is a Cloudflare block
-     * (403 / challenge page) or [usable] rejects the parsed document, the page
-     * is rendered in a WebView and that HTML is parsed instead.
-     * For hdpornfull.com, we show manual bypass dialog immediately since Cloudflare
-     * consistently blocks automated requests.
+     * Fetches [url] using persistent WebView with cookie persistence.
+     * Only shows manual bypass dialog ONCE per session.
+     * Subsequent requests reuse the same WebView session (cookies, CF clearance).
      */
     private suspend fun fetchDocument(url: String, usable: (Document) -> Boolean): Document? {
-        // For hdpornfull.com, skip HTTP and headless WebView - go straight to manual bypass
-        // This saves time since Cloudflare consistently blocks automated requests
-        Log.d("HdPornFull", "Showing manual Cloudflare bypass dialog immediately for $url")
-        val html = showManualBypassDialog(url) ?: return null
+        val webView = ensurePersistentWebView()
+        syncCookiesToWebView(webView)
+
+        // 1. Try HTTP first with cookies from persistent WebView
+        val cookieHeader = CookieManager.getInstance().getCookie(mainUrl)
+        val httpHeaders = if (cookieHeader != null) browserHeaders + mapOf("Cookie" to cookieHeader) else browserHeaders
+
+        val httpDoc = runCatching {
+            val response = app.get(url, headers = httpHeaders)
+            if (response.code == 403 || response.code == 503) null else response.document
+        }.getOrNull()
+
+        if (httpDoc != null) {
+            val isChallenge = httpDoc.isChallenge()
+            val isUsable = usable(httpDoc)
+            Log.d("HdPornFull", "HTTP fetch for $url: code=${runCatching { app.get(url, headers = httpHeaders).code }.getOrNull()}, challenge=$isChallenge, usable=$isUsable, title='${httpDoc.title()}'")
+            if (!isChallenge && isUsable) {
+                // Sync any new cookies from response
+                response.headers["Set-Cookie"]?.forEach { CookieManager.getInstance().setCookie(mainUrl, it) }
+                CookieManager.getInstance().flush()
+                return httpDoc
+            }
+        }
+
+        // 2. Try persistent WebView (headless) - reuses session/cookies
+        if (isSessionReady) {
+            Log.d("HdPornFull", "Using persistent WebView session for $url")
+            val html = getRenderedHtmlViaPersistentWebView(url, webView)
+            if (html != null) {
+                val webDoc = runCatching { Jsoup.parse(html, url) }.getOrNull()
+                if (webDoc != null) {
+                    val isChallenge = webDoc.isChallenge()
+                    val isUsable = usable(webDoc)
+                    Log.d("HdPornFull", "Persistent WebView fetch for $url: challenge=$isChallenge, usable=$isUsable, title='${webDoc.title()}'")
+                    if (!isChallenge && isUsable) return webDoc
+                }
+            }
+        }
+
+        // 3. Only show manual dialog ONCE per session
+        if (!isSessionReady) {
+            Log.d("HdPornFull", "Session not ready - showing manual bypass dialog for $url")
+            val html = showManualBypassDialog(url, webView) ?: return null
+            val manualDoc = runCatching { Jsoup.parse(html, url) }.getOrNull()
+            if (manualDoc != null) {
+                val isChallenge = manualDoc.isChallenge()
+                val isUsable = usable(manualDoc)
+                Log.d("HdPornFull", "Manual bypass result for $url: challenge=$isChallenge, usable=$isUsable, title='${manualDoc.title()}'")
+                if (!isChallenge && isUsable) {
+                    isSessionReady = true // Mark session ready - no more dialogs!
+                    Log.d("HdPornFull", "Cloudflare session established - future requests will use persistent WebView")
+                    return manualDoc
+                }
+            }
+            return null
+        }
+
+        // Session ready but persistent WebView failed - try manual dialog as last resort
+        Log.d("HdPornFull", "Persistent WebView failed, trying manual dialog again for $url")
+        val html = showManualBypassDialog(url, webView) ?: return null
         val manualDoc = runCatching { Jsoup.parse(html, url) }.getOrNull()
         if (manualDoc != null) {
             val isChallenge = manualDoc.isChallenge()
             val isUsable = usable(manualDoc)
-            Log.d("HdPornFull", "Manual bypass result for $url: challenge=$isChallenge, usable=$isUsable, title='${manualDoc.title()}'")
             if (!isChallenge && isUsable) return manualDoc
         }
         return null
+    }
+
+    /**
+     * Renders URL in the PERSISTENT WebView (headless) and returns HTML.
+     * Uses existing session/cookies.
+     */
+    @SuppressLint("SetJavaScriptEnabled")
+    private suspend fun getRenderedHtmlViaPersistentWebView(pageUrl: String, webView: WebView): String? {
+        return suspendCancellableCoroutine { cont ->
+            Handler(Looper.getMainLooper()).post {
+                val startTime = System.currentTimeMillis()
+                val maxWaitMs = 20_000L
+                var pollCount = 0
+                fun poll() {
+                    if (!cont.isActive) return
+                    pollCount++
+                    webView.evaluateJavascript(
+                        "(function(){" +
+                            "var articles = document.querySelectorAll('article').length;" +
+                            "var playerLinks = document.querySelectorAll(\"a[href*='streamtape'],a[href*='doodstream'],a[href*='lulust'],a[href*='smoothpre'],a[href*='send.now'],a[href*='filemoon'],a[href*='mixdrop'],a[href*='vidhide'],a[href*='streamwish'],a[href*='voe.']\").length;" +
+                            "var buttons = document.querySelectorAll('button[onclick], .stream-link, .download-link').length;" +
+                            "var ready = (articles >= 3 || playerLinks > 0 || buttons > 0);" +
+                            "return ready ? 'ready' : 'wait';" +
+                        "})()"
+                    ) { state ->
+                        if (!cont.isActive) return@evaluateJavascript
+                        val elapsed = System.currentTimeMillis() - startTime
+                        Log.d("HdPornFull", "Persistent WebView poll #$pollCount for $pageUrl: state=$state, elapsed=${elapsed}ms")
+                        if (state?.contains("ready") == true || elapsed >= maxWaitMs) {
+                            webView.evaluateJavascript("document.documentElement.outerHTML") { html ->
+                                if (cont.isActive) {
+                                    val decoded = runCatching {
+                                        JSONObject("{\"v\":$html}").getString("v")
+                                    }.getOrNull()
+                                    if (decoded != null && decoded.length > 1000) {
+                                        Log.d("HdPornFull", "Persistent WebView success for $pageUrl: ${decoded.length} chars")
+                                        cont.resume(decoded)
+                                    } else {
+                                        Log.e("HdPornFull", "Persistent WebView returned empty/small HTML for $pageUrl")
+                                        cont.resume(null)
+                                    }
+                                }
+                            }
+                        } else {
+                            webView.postDelayed({ poll() }, 2000)
+                        }
+                    }
+                }
+                webView.webViewClient = object : WebViewClient() {
+                    override fun onPageFinished(view: WebView, url: String?) {
+                        Log.d("HdPornFull", "Persistent WebView onPageFinished: $url")
+                        view.evaluateJavascript(
+                            "document.querySelectorAll('video,audio').forEach(function(e){try{e.muted=true;e.volume=0;}catch(x){}});",
+                            null
+                        )
+                        view.postDelayed({ poll() }, 2000)
+                    }
+                    override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: WebResourceError?) {
+                        Log.e("HdPornFull", "Persistent WebView error: ${error?.description}")
+                    }
+                }
+                webView.loadUrl(pageUrl, browserHeaders)
+                Handler(Looper.getMainLooper()).postDelayed({
+                    if (cont.isActive) {
+                        Log.e("HdPornFull", "Persistent WebView timeout for $pageUrl after ${maxWaitMs}ms")
+                        cont.resume(null)
+                    }
+                }, maxWaitMs + 5000)
+            }
+        }
     }
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
@@ -341,13 +498,16 @@ class HdPornFull(private val activity: android.app.Activity) : MainAPI() {
 
     /**
      * Shows a manual Cloudflare bypass dialog with a visible WebView.
-     * User can interact with the page to solve the challenge (checkbox, slider, etc.).
+     * Uses the persistent WebView's cookies/session. After solving, cookies sync back.
      * Returns the page HTML after user clicks "Done" or when challenge appears to be cleared.
      */
     @SuppressLint("SetJavaScriptEnabled", "JavascriptInterface")
-    private suspend fun showManualBypassDialog(pageUrl: String): String? {
+    private suspend fun showManualBypassDialog(pageUrl: String, persistentWebView: WebView): String? {
         // Use the Activity passed from plugin for valid window token
         val context = activity ?: return null
+
+        // Sync cookies from persistent WebView to CookieManager (global)
+        CookieManager.getInstance().flush()
 
         return suspendCancellableCoroutine { cont ->
             Handler(Looper.getMainLooper()).post {
@@ -360,6 +520,9 @@ class HdPornFull(private val activity: android.app.Activity) : MainAPI() {
                     settings.setSupportZoom(true)
                     settings.builtInZoomControls = true
                     settings.displayZoomControls = false
+                    // Use same cookie store
+                    CookieManager.getInstance().setAcceptCookie(true)
+                    CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
                 }
 
                 // Container for WebView in dialog
@@ -382,6 +545,8 @@ class HdPornFull(private val activity: android.app.Activity) : MainAPI() {
                             val doc = Jsoup.parse(decoded, pageUrl)
                             if (!doc.isChallenge()) {
                                 Log.d("HdPornFull", "Manual bypass success (auto): ${decoded.length} chars")
+                                // Sync cookies from dialog WebView to global CookieManager
+                                CookieManager.getInstance().flush()
                                 cont.resume(decoded)
                                 webView.destroy()
                                 dialog.dismiss()
