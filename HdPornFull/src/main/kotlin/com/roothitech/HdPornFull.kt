@@ -370,6 +370,8 @@ class HdPornFull(private val activity: android.app.Activity) : MainAPI() {
                 )
                 container.addView(webView)
 
+                lateinit var dialog: AlertDialog
+
                 // Auto-detect when Cloudflare challenge is cleared
                 fun captureHtml() {
                     webView.evaluateJavascript("document.documentElement.outerHTML") { html ->
@@ -419,7 +421,7 @@ class HdPornFull(private val activity: android.app.Activity) : MainAPI() {
                     }, 3000) // Check every 3 seconds
                 }
 
-                val dialog = AlertDialog.Builder(context)
+                dialog = AlertDialog.Builder(context)
                     .setTitle("Cloudflare Protection - Manual Bypass")
                     .setMessage("Please solve the Cloudflare challenge below. It will auto-continue when cleared.")
                     .setView(container)
