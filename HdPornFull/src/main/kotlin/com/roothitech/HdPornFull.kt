@@ -40,7 +40,10 @@ class HdPornFull : MainAPI() {
     private fun Document.isChallenge(): Boolean =
         title().contains("just a moment", ignoreCase = true) ||
             text().contains("verify you are human", ignoreCase = true) ||
-            selectFirst("iframe[src*='challenges.cloudflare.com'], #challenge-form, #cf-challenge-running") != null
+            selectFirst("iframe[src*='challenges.cloudflare.com'], #challenge-form, #cf-challenge-running, #cf-wrapper") != null ||
+            selectFirst("script[src*='challenges.cloudflare.com'], script[nonce*='challenge']") != null ||
+            text().contains("ray id", ignoreCase = true) ||
+            text().contains("cf_chl_", ignoreCase = true)
 
     /**
      * Fetches [url] over HTTP first. If the response is a Cloudflare block
@@ -50,13 +53,27 @@ class HdPornFull : MainAPI() {
     private suspend fun fetchDocument(url: String, usable: (Document) -> Boolean): Document? {
         val httpDoc = runCatching {
             val response = app.get(url, headers = browserHeaders)
-            if (response.code == 403) null else response.document
+            if (response.code == 403 || response.code == 503) null else response.document
         }.getOrNull()
-        if (httpDoc != null && !httpDoc.isChallenge() && usable(httpDoc)) return httpDoc
+        
+        // Check if HTTP result is valid
+        if (httpDoc != null) {
+            val isChallenge = httpDoc.isChallenge()
+            val isUsable = usable(httpDoc)
+            Log.d("HdPornFull", "HTTP fetch for $url: code=${runCatching { app.get(url, headers = browserHeaders).code }.getOrNull()}, challenge=$isChallenge, usable=$isUsable, title='${httpDoc.title()}'")
+            if (!isChallenge && isUsable) return httpDoc
+        }
 
         Log.d("HdPornFull", "HTTP fetch blocked or unusable for $url; rendering via WebView")
         val html = getRenderedHtmlViaWebView(url) ?: return httpDoc
-        return runCatching { Jsoup.parse(html, url) }.getOrNull() ?: httpDoc
+        val webDoc = runCatching { Jsoup.parse(html, url) }.getOrNull()
+        if (webDoc != null) {
+            val isChallenge = webDoc.isChallenge()
+            val isUsable = usable(webDoc)
+            Log.d("HdPornFull", "WebView fetch for $url: challenge=$isChallenge, usable=$isUsable, title='${webDoc.title()}'")
+            if (!isChallenge && isUsable) return webDoc
+        }
+        return httpDoc
     }
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
@@ -100,6 +117,8 @@ class HdPornFull : MainAPI() {
         ).firstOrNull { it?.isNotBlank() == true && !it!!.startsWith("data:image", ignoreCase = true) }
             ?.substringBefore(",")?.substringBefore(" ")
 
+        Log.d("HdPornFull", "Search result: title='$title', href=$href, poster=${poster != null}")
+
         return newMovieSearchResponse(title.trim(), href, TvType.NSFW) {
             this.posterUrl = poster?.let { fixUrlNull(it) }
         }
@@ -117,6 +136,8 @@ class HdPornFull : MainAPI() {
     override suspend fun load(url: String): LoadResponse? {
         val document = fetchDocument(url) { it.selectFirst("h1") != null } ?: return null
 
+        Log.d("HdPornFull", "Loading video page: $url, title='${document.title()}'")
+
         // Title extraction with fallbacks
         val title = document.selectFirst("main article h1")?.text()?.trim()
             ?: document.selectFirst("h1")?.text()?.trim()
@@ -133,6 +154,8 @@ class HdPornFull : MainAPI() {
         // Plot: h4 block with release info
         val plot = document.selectFirst("main article h4")?.text()?.trim()
             ?: document.selectFirst("article h4")?.text()?.trim()
+
+        Log.d("HdPornFull", "Extracted: title='$title', poster=${poster != null}, plot=${plot != null}")
 
         return newMovieLoadResponse(title, url, TvType.NSFW, url) {
             this.posterUrl = poster?.let { fixUrlNull(it) }
@@ -176,6 +199,7 @@ class HdPornFull : MainAPI() {
             val href = anchor.attr("abs:href").ifBlank { anchor.attr("href") }
             if (href.isNotBlank() && streamingHosts.any { href.contains(it, ignoreCase = true) }) {
                 links.add(href)
+                Log.d("HdPornFull", "Found streaming link: $href")
             }
         }
 
@@ -184,9 +208,28 @@ class HdPornFull : MainAPI() {
             val src = iframe.attr("abs:src").ifBlank { iframe.attr("src") }
             if (src.isNotBlank() && adFramePatterns.none { src.contains(it, ignoreCase = true) }) {
                 links.add(src)
+                Log.d("HdPornFull", "Found iframe link: $src")
             }
         }
 
+        // Also check for direct links in button-like elements
+        article.select("button[onclick], a.btn, .stream-link, .download-link").forEach { elem ->
+            val href = when {
+                elem.tagName() == "a" -> elem.attr("abs:href").ifBlank { elem.attr("href") }
+                elem.hasAttr("onclick") -> {
+                    val onclick = elem.attr("onclick")
+                    val urlMatch = Regex("https?://[^\"'\\s)]+").find(onclick)
+                    urlMatch?.value ?: ""
+                }
+                else -> ""
+            }
+            if (href.isNotBlank() && streamingHosts.any { href.contains(it, ignoreCase = true) }) {
+                links.add(href)
+                Log.d("HdPornFull", "Found button/link element: $href")
+            }
+        }
+
+        Log.d("HdPornFull", "Total streaming links extracted: ${links.size}")
         return links
     }
 
@@ -201,7 +244,7 @@ class HdPornFull : MainAPI() {
         val links = extractStreamLinks(document)
 
         if (links.isEmpty()) {
-            Log.d("HdPornFull", "No streaming links found for $data")
+            Log.e("HdPornFull", "No streaming links found for $data")
             return false
         }
 
@@ -233,28 +276,41 @@ class HdPornFull : MainAPI() {
                     settings.javaScriptEnabled = true
                     settings.domStorageEnabled = true
                     settings.userAgentString = browserHeaders.getValue("User-Agent")
+                    settings.loadsImagesAutomatically = false // Speed up loading
+                    settings.blockNetworkLoads = false
                 }
                 val startTime = System.currentTimeMillis()
                 val maxWaitMs = 30_000L
+                var pollCount = 0
                 fun poll() {
                     if (!cont.isActive) return
+                    pollCount++
                     // Ready when: articles present OR player-host links present
                     webView.evaluateJavascript(
                         "(function(){" +
                             "var articles = document.querySelectorAll('article').length;" +
                             "var playerLinks = document.querySelectorAll(\"a[href*='streamtape'],a[href*='doodstream'],a[href*='lulust'],a[href*='smoothpre'],a[href*='send.now'],a[href*='filemoon'],a[href*='mixdrop'],a[href*='vidhide'],a[href*='streamwish'],a[href*='voe.']\").length;" +
-                            "return (articles >= 3 || playerLinks > 0) ? 'ready' : 'wait';" +
+                            "var buttons = document.querySelectorAll('button[onclick], .stream-link, .download-link').length;" +
+                            "var ready = (articles >= 3 || playerLinks > 0 || buttons > 0);" +
+                            "return ready ? 'ready' : 'wait';" +
                         "})()"
                     ) { state ->
                         if (!cont.isActive) return@evaluateJavascript
                         val elapsed = System.currentTimeMillis() - startTime
+                        Log.d("HdPornFull", "WebView poll #$pollCount for $pageUrl: state=$state, elapsed=${elapsed}ms")
                         if (state?.contains("ready") == true || elapsed >= maxWaitMs) {
                             webView.evaluateJavascript("document.documentElement.outerHTML") { html ->
                                 if (cont.isActive) {
                                     val decoded = runCatching {
                                         JSONObject("{\"v\":$html}").getString("v")
                                     }.getOrNull()
-                                    cont.resume(decoded)
+                                    if (decoded != null && decoded.length > 1000) {
+                                        Log.d("HdPornFull", "WebView success for $pageUrl: ${decoded.length} chars")
+                                        cont.resume(decoded)
+                                    } else {
+                                        Log.e("HdPornFull", "WebView returned empty/small HTML for $pageUrl")
+                                        cont.resume(null)
+                                    }
                                 }
                                 webView.destroy()
                             }
@@ -265,16 +321,22 @@ class HdPornFull : MainAPI() {
                 }
                 webView.webViewClient = object : WebViewClient() {
                     override fun onPageFinished(view: WebView, url: String?) {
+                        Log.d("HdPornFull", "WebView onPageFinished: $url")
                         view.evaluateJavascript(
                             "document.querySelectorAll('video,audio').forEach(function(e){try{e.muted=true;e.volume=0;}catch(x){}});",
                             null
                         )
                         view.postDelayed({ poll() }, 3000)
                     }
+                    
+                    override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: WebResourceError?) {
+                        Log.e("HdPornFull", "WebView error: ${error?.description}")
+                    }
                 }
                 webView.loadUrl(pageUrl, browserHeaders)
                 Handler(Looper.getMainLooper()).postDelayed({
                     if (cont.isActive) {
+                        Log.e("HdPornFull", "WebView timeout for $pageUrl after ${maxWaitMs}ms")
                         cont.resume(null)
                         webView.destroy()
                     }
