@@ -278,8 +278,8 @@ class XTapes : MainAPI() {
         // direct HTTP unpack below handles both — no slow WebView needed for the main player.
         val embed74k = playerUrls.firstOrNull { isHostOrSubdomain(it, "74k.io") || isHostOrSubdomain(it, "sextapes.to") }
         var embed74kBlockedByChallenge = false
+        var got74kDirectLinks = false
         if (embed74k != null) {
-            var got74kDirectLinks = false
             try {
                 Log.d("XTapes", "Found 74k.io player host: ${URI(embed74k).host}")
                 val embedDocument = app.get(embed74k, referer = pageUrl, headers = browserHeaders).document
@@ -301,16 +301,21 @@ class XTapes : MainAPI() {
             } catch (e: Exception) {
                 Log.e("XTapes", "Error extracting from 74k.io: ${e.message}")
             }
-            // Fast path won: return immediately instead of also running the slow
-            // WebView extractions below (they stacked 20s+ waits after every success).
-            if (got74kDirectLinks) return true
-            // No WebView retry for this embed here: the player loop and the final
-            // main-page WebView below remain as backstops, without stacked waits.
-            Log.d("XTapes", "Direct packed-player extraction produced no links")
+            // Keep the fast 74k.io sources, but do NOT return early: the site
+            // exposes a second player (88z.io) and the user wants sources from both.
+            // The player loop below handles 88z.io; skip 74k.io there to avoid
+            // re-extracting it.
+            if (got74kDirectLinks) {
+                Log.d("XTapes", "74k.io direct extraction succeeded; continuing to other players")
+            } else {
+                Log.d("XTapes", "Direct packed-player extraction produced no links")
+            }
         }
 
         // Try every player so the user gets sources from all of them and can pick the fastest.
         for (playerUrl in playerUrls) {
+            // 74k.io was already unpacked above; skip it here to avoid duplicate work.
+            if (got74kDirectLinks && (isHostOrSubdomain(playerUrl, "74k.io") || isHostOrSubdomain(playerUrl, "sextapes.to"))) continue
             if (embed74kBlockedByChallenge && isHostOrSubdomain(playerUrl, "74k.io")) continue
             if (isHostOrSubdomain(playerUrl, "88z.io")) {
                 try {
