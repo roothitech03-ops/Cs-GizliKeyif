@@ -44,7 +44,7 @@ class HdPornFull(private val activity: android.app.Activity) : MainAPI() {
         @SuppressLint("StaticFieldLeak")
         private var persistentWebView: WebView? = null
         private var isSessionReady = false
-        private var initLock: Any? = null
+        private val initLock = Any()
         
         // These will be set by the first instance
         private var savedUserAgent: String? = null
@@ -59,10 +59,11 @@ class HdPornFull(private val activity: android.app.Activity) : MainAPI() {
         fun setSavedUserAgent(ua: String) { savedUserAgent = ua }
         fun getSavedContext(): Context? = savedContext
         fun setSavedContext(ctx: Context) { savedContext = ctx }
+        fun getInitLock(): Any = initLock
     }
 
     private fun ensurePersistentWebView(): WebView {
-        return HdPornFull.getPersistentWebView() ?: synchronized(HdPornFull::class) {
+        return HdPornFull.getPersistentWebView() ?: synchronized(HdPornFull.getInitLock()) {
             HdPornFull.getPersistentWebView() ?: run {
                 // Initialize static fields from this instance if not set
                 if (HdPornFull.getSavedUserAgent() == null) HdPornFull.setSavedUserAgent(browserHeaders.getValue("User-Agent"))
