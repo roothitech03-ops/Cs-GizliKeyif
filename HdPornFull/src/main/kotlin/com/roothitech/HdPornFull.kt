@@ -24,18 +24,14 @@ class HdPornFull : MainAPI() {
     override val supportedTypes = setOf(TvType.NSFW)
     override val vpnStatus = VPNStatus.MightBeNeeded
 
-    // The site sits behind a Cloudflare "Verify you are human" check that
-    // blocks plain HTTP clients (the app received the challenge page, so v1
-    // showed the section names but zero videos). Requests use browser-like
-    // headers, and anything blocked or empty is re-fetched through a real
-    // WebView, whose Chrome TLS fingerprint passes the check (XTapes pattern).
+    // Browser-like headers to bypass Cloudflare basic checks
     private val browserHeaders = mapOf(
         "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
         "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language" to "en-US,en;q=0.9"
     )
 
-    // Verified on the site: cat=110 is the "Latest Porn Movies" listing.
+    // Verified on the site: cat=110 is the "Latest Porn Movies" listing
     override val mainPage = mainPageOf(
         "$mainUrl/?filter=latest" to "Latest Porn Videos",
         "$mainUrl/?filter=latest&cat=110" to "Latest Porn Movies"
@@ -76,11 +72,15 @@ class HdPornFull : MainAPI() {
         return newHomePageResponse(request.name, home, hasNext = home.isNotEmpty())
     }
 
-    // Listing cards are article elements whose single anchor wraps the
-    // thumbnail and metadata; the title is the thumbnail's alt text.
+    /**
+     * Extracts video info from article element on listing pages.
+     * Key: uses data-main-thumb attribute for thumbnail.
+     */
     private fun Element.toSearchResult(): SearchResponse? {
         val anchor = selectFirst("a[href][title]") ?: selectFirst("a[href]") ?: return null
         val href = fixUrlNull(anchor.attr("abs:href").ifBlank { anchor.attr("href") }) ?: return null
+
+        // Title: prefer anchor title, then img alt, then h2/h3, then anchor text
         val img = selectFirst("img")
         val title = listOfNotNull(
             anchor.attr("title").takeIf { it.isNotBlank() },
@@ -89,13 +89,17 @@ class HdPornFull : MainAPI() {
             selectFirst("h2, h3")?.text()?.takeIf { it.isNotBlank() },
             anchor.text().takeIf { it.isNotBlank() }
         ).firstOrNull() ?: return null
-        val poster = img?.let { image ->
-            listOf("data-src", "data-original", "data-lazy-src", "src", "data-srcset", "srcset")
-                .asSequence()
-                .map { image.attr(it) }
-                .firstOrNull { it.isNotBlank() && !it.startsWith("data:image", ignoreCase = true) }
-                ?.substringBefore(",")?.substringBefore(" ")
-        }
+
+        // Poster: data-main-thumb is the primary source (verified on site)
+        val poster = listOf(
+            attr("data-main-thumb"),
+            img?.attr("data-src"),
+            img?.attr("data-original"),
+            img?.attr("data-lazy-src"),
+            img?.attr("src")
+        ).firstOrNull { it.isNotBlank() && !it.startsWith("data:image", ignoreCase = true) }
+            ?.substringBefore(",")?.substringBefore(" ")
+
         return newMovieSearchResponse(title.trim(), href, TvType.NSFW) {
             this.posterUrl = poster?.let { fixUrlNull(it) }
         }
@@ -112,46 +116,77 @@ class HdPornFull : MainAPI() {
 
     override suspend fun load(url: String): LoadResponse? {
         val document = fetchDocument(url) { it.selectFirst("h1") != null } ?: return null
+
+        // Title extraction with fallbacks
         val title = document.selectFirst("main article h1")?.text()?.trim()
             ?: document.selectFirst("h1")?.text()?.trim()
             ?: document.selectFirst("meta[property='og:title']")?.attr("content")?.trim()
             ?: "Untitled"
+
+        // Poster: prefer article's data-main-thumb, then og:image
+        val article = document.selectFirst("article")
+        val poster = article?.attr("data-main-thumb")
+            ?.takeIf { it.isNotBlank() }
+            ?.substringBefore(",")?.substringBefore(" ")
+            ?: document.selectFirst("meta[property='og:image']")?.attr("content")
+
+        // Plot: h4 block with release info
+        val plot = document.selectFirst("main article h4")?.text()?.trim()
+            ?: document.selectFirst("article h4")?.text()?.trim()
+
         return newMovieLoadResponse(title, url, TvType.NSFW, url) {
-            posterUrl = fixUrlNull(document.selectFirst("meta[property='og:image']")?.attr("content"))
-            // The page has no prose description; its h4 block carries the
-            // release info (file name, size, duration, codec).
-            plot = document.selectFirst("main article h4")?.text()?.trim()
-                ?: document.selectFirst("article h4")?.text()?.trim()
+            this.posterUrl = poster?.let { fixUrlNull(it) }
+            this.plot = plot
         }
     }
 
-    // Every player source the video page exposes: the in-page player iframe
-    // plus the stream links listed on the page.
-    // shortcut: RapidGator links are skipped on purpose, it is a
-    // download-only host with no streaming extractor.
-    private val hostHints = listOf(
-        "streamtape", "lulust", "lulu", "smoothpre", "earnvids", "send.now",
-        "dood", "mixdrop", "bigwarp", "filemoon", "streamhide",
-        "vidhide", "filelions", "streamwish", "voe."
+    // Streaming hosts verified on the site
+    private val streamingHosts = listOf(
+        "streamtape.to", "streamtape.com", "streamtape.net",
+        "lulust.com",
+        "send.now", "send.cm",
+        "smoothpre.com", "earnvids.com",
+        "doodstream.com", "dood.so", "dood.pm", "dood.to", "dood.watch", "dood.cx",
+        "mixdrop.co", "mixdrop.to", "mixdrop.sx",
+        "filemoon.sx", "filemoon.to",
+        "vidhide.com", "vidhidepro.com",
+        "streamwish.com", "streamwish.to",
+        "voe.sx"
     )
 
-    // Iframes that are never the video player (verified on the site: the
-    // article also carries live-cam and gambling ad frames).
-    private val adFrameHints = listOf(
+    // Ad/non-video iframe patterns to skip
+    private val adFramePatterns = listOf(
         "cloudflare", "google", "stripchat", "chaturbate",
-        "bongacams", "livejasmin", "exoclick", "trafficjunky"
+        "bongacams", "livejasmin", "exoclick", "trafficjunky",
+        "doubleclick", "googlesyndication", "amazon-adsystem"
     )
 
-    private fun extractLinks(document: Document): Set<String> {
+    /**
+     * Extracts all streaming links from the video page.
+     * The page has a "Download / Stream Links" section with anchor tags.
+     */
+    private fun extractStreamLinks(document: Document): Set<String> {
         val links = LinkedHashSet<String>()
-        document.select("article iframe[src]").forEach { iframe ->
-            val src = iframe.attr("abs:src").ifBlank { iframe.attr("src") }
-            if (src.isNotBlank() && adFrameHints.none { src.contains(it) }) links.add(src)
-        }
-        document.select("article a[href]").forEach { anchor ->
+
+        // Primary: anchors in the article/content area
+        val article = document.selectFirst("article") ?: document.selectFirst("main") ?: document
+
+        // Find all links in the content area that match streaming hosts
+        article.select("a[href]").forEach { anchor ->
             val href = anchor.attr("abs:href").ifBlank { anchor.attr("href") }
-            if (hostHints.any { href.contains(it) }) links.add(href)
+            if (href.isNotBlank() && streamingHosts.any { href.contains(it, ignoreCase = true) }) {
+                links.add(href)
+            }
         }
+
+        // Also check iframes (fallback)
+        article.select("iframe[src]").forEach { iframe ->
+            val src = iframe.attr("abs:src").ifBlank { iframe.attr("src") }
+            if (src.isNotBlank() && adFramePatterns.none { src.contains(it, ignoreCase = true) }) {
+                links.add(src)
+            }
+        }
+
         return links
     }
 
@@ -161,9 +196,18 @@ class HdPornFull : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val document = fetchDocument(data) { extractLinks(it).isNotEmpty() } ?: return false
+        val document = fetchDocument(data) { extractStreamLinks(it).isNotEmpty() } ?: return false
         var found = false
-        extractLinks(document).forEach { link ->
+        val links = extractStreamLinks(document)
+
+        if (links.isEmpty()) {
+            Log.d("HdPornFull", "No streaming links found for $data")
+            return false
+        }
+
+        Log.d("HdPornFull", "Found ${links.size} streaming links for $data")
+        links.forEach { link ->
+            Log.d("HdPornFull", "Trying extractor for: $link")
             if (loadExtractor(link, "$mainUrl/", subtitleCallback, callback)) found = true
         }
         return found
@@ -171,10 +215,9 @@ class HdPornFull : MainAPI() {
 
     /**
      * Renders [pageUrl] in a real Android WebView and returns its HTML once
-     * the page content (articles or a player iframe) has appeared and the
+     * the page content (articles or a player-host link) has appeared and the
      * Cloudflare check has cleared. A WebView uses Chrome's TLS fingerprint,
      * so it passes checks that block OkHttp. Returns null on timeout.
-     * Same pattern as the XTapes provider.
      */
     @SuppressLint("SetJavaScriptEnabled")
     private suspend fun getRenderedHtmlViaWebView(pageUrl: String): String? {
@@ -192,16 +235,16 @@ class HdPornFull : MainAPI() {
                     settings.userAgentString = browserHeaders.getValue("User-Agent")
                 }
                 val startTime = System.currentTimeMillis()
-                val maxWaitMs = 25_000L
+                val maxWaitMs = 30_000L
                 fun poll() {
                     if (!cont.isActive) return
-                    // Ready ONLY on real content: listing/video articles or a
-                    // player-host link. Never on iframes in general - the
-                    // Cloudflare challenge page itself contains an iframe, and
-                    // v2 grabbed the still-challenged page instantly because
-                    // of that, so the app again showed zero videos.
+                    // Ready when: articles present OR player-host links present
                     webView.evaluateJavascript(
-                        "(function(){var a=document.querySelectorAll('article').length;var p=document.querySelectorAll(\"a[href*='streamtape'],a[href*='doodstream'],a[href*='lulust'],a[href*='smoothpre'],a[href*='send.now']\").length;return (a>=3||p>0)?'ready':'wait';})()"
+                        "(function(){" +
+                            "var articles = document.querySelectorAll('article').length;" +
+                            "var playerLinks = document.querySelectorAll(\"a[href*='streamtape'],a[href*='doodstream'],a[href*='lulust'],a[href*='smoothpre'],a[href*='send.now'],a[href*='filemoon'],a[href*='mixdrop'],a[href*='vidhide'],a[href*='streamwish'],a[href*='voe.']\").length;" +
+                            "return (articles >= 3 || playerLinks > 0) ? 'ready' : 'wait';" +
+                        "})()"
                     ) { state ->
                         if (!cont.isActive) return@evaluateJavascript
                         val elapsed = System.currentTimeMillis() - startTime
@@ -222,8 +265,6 @@ class HdPornFull : MainAPI() {
                 }
                 webView.webViewClient = object : WebViewClient() {
                     override fun onPageFinished(view: WebView, url: String?) {
-                        // Mute any media in the rendered page so no audio leaks
-                        // while the hidden WebView renders a video page.
                         view.evaluateJavascript(
                             "document.querySelectorAll('video,audio').forEach(function(e){try{e.muted=true;e.volume=0;}catch(x){}});",
                             null
