@@ -98,18 +98,19 @@ class HdPornFull(private val activity: android.app.Activity) : MainAPI() {
         val cookieHeader = CookieManager.getInstance().getCookie(mainUrl)
         val httpHeaders = if (cookieHeader != null) browserHeaders + mapOf("Cookie" to cookieHeader) else browserHeaders
 
-        val httpDoc = runCatching {
+        val httpResult = runCatching {
             val response = app.get(url, headers = httpHeaders)
-            if (response.code == 403 || response.code == 503) null else response.document
+            if (response.code == 403 || response.code == 503) null else response
         }.getOrNull()
 
-        if (httpDoc != null) {
+        if (httpResult != null) {
+            val httpDoc = httpResult.document
             val isChallenge = httpDoc.isChallenge()
             val isUsable = usable(httpDoc)
-            Log.d("HdPornFull", "HTTP fetch for $url: code=${runCatching { app.get(url, headers = httpHeaders).code }.getOrNull()}, challenge=$isChallenge, usable=$isUsable, title='${httpDoc.title()}'")
+            Log.d("HdPornFull", "HTTP fetch for $url: code=${httpResult.code}, challenge=$isChallenge, usable=$isUsable, title='${httpDoc.title()}'")
             if (!isChallenge && isUsable) {
                 // Sync any new cookies from response
-                response.headers["Set-Cookie"]?.forEach { CookieManager.getInstance().setCookie(mainUrl, it) }
+                httpResult.headers["Set-Cookie"]?.forEach { CookieManager.getInstance().setCookie(mainUrl, it) }
                 CookieManager.getInstance().flush()
                 return httpDoc
             }
