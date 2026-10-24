@@ -1,13 +1,17 @@
 package com.roothitech
 
 import android.annotation.SuppressLint
+import android.app.AlertDialog
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
+import android.view.ViewGroup
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceError
+import android.webkit.WebChromeClient
+import android.widget.FrameLayout
 import org.json.JSONObject
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
@@ -51,13 +55,14 @@ class HdPornFull : MainAPI() {
      * Fetches [url] over HTTP first. If the response is a Cloudflare block
      * (403 / challenge page) or [usable] rejects the parsed document, the page
      * is rendered in a WebView and that HTML is parsed instead.
+     * If headless WebView also fails, offers manual bypass dialog.
      */
     private suspend fun fetchDocument(url: String, usable: (Document) -> Boolean): Document? {
         val httpDoc = runCatching {
             val response = app.get(url, headers = browserHeaders)
             if (response.code == 403 || response.code == 503) null else response.document
         }.getOrNull()
-        
+
         // Check if HTTP result is valid
         if (httpDoc != null) {
             val isChallenge = httpDoc.isChallenge()
@@ -66,14 +71,27 @@ class HdPornFull : MainAPI() {
             if (!isChallenge && isUsable) return httpDoc
         }
 
-        Log.d("HdPornFull", "HTTP fetch blocked or unusable for $url; rendering via WebView")
-        val html = getRenderedHtmlViaWebView(url) ?: return httpDoc
-        val webDoc = runCatching { Jsoup.parse(html, url) }.getOrNull()
-        if (webDoc != null) {
-            val isChallenge = webDoc.isChallenge()
-            val isUsable = usable(webDoc)
-            Log.d("HdPornFull", "WebView fetch for $url: challenge=$isChallenge, usable=$isUsable, title='${webDoc.title()}'")
-            if (!isChallenge && isUsable) return webDoc
+        Log.d("HdPornFull", "HTTP fetch blocked or unusable for $url; trying headless WebView")
+        var html = getRenderedHtmlViaWebView(url)
+        if (html != null) {
+            val webDoc = runCatching { Jsoup.parse(html, url) }.getOrNull()
+            if (webDoc != null) {
+                val isChallenge = webDoc.isChallenge()
+                val isUsable = usable(webDoc)
+                Log.d("HdPornFull", "Headless WebView fetch for $url: challenge=$isChallenge, usable=$isUsable, title='${webDoc.title()}'")
+                if (!isChallenge && isUsable) return webDoc
+            }
+        }
+
+        // If headless WebView fails, try manual bypass dialog
+        Log.d("HdPornFull", "Headless WebView failed for $url; showing manual Cloudflare bypass dialog")
+        html = showManualBypassDialog(url) ?: return httpDoc
+        val manualDoc = runCatching { Jsoup.parse(html, url) }.getOrNull()
+        if (manualDoc != null) {
+            val isChallenge = manualDoc.isChallenge()
+            val isUsable = usable(manualDoc)
+            Log.d("HdPornFull", "Manual bypass result for $url: challenge=$isChallenge, usable=$isUsable, title='${manualDoc.title()}'")
+            if (!isChallenge && isUsable) return manualDoc
         }
         return httpDoc
     }
@@ -259,7 +277,7 @@ class HdPornFull : MainAPI() {
     }
 
     /**
-     * Renders [pageUrl] in a real Android WebView and returns its HTML once
+     * Renders [pageUrl] in a real Android WebView (headless) and returns its HTML once
      * the page content (articles or a player-host link) has appeared and the
      * Cloudflare check has cleared. A WebView uses Chrome's TLS fingerprint,
      * so it passes checks that block OkHttp. Returns null on timeout.
@@ -330,7 +348,7 @@ class HdPornFull : MainAPI() {
                         )
                         view.postDelayed({ poll() }, 3000)
                     }
-                    
+
                     override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: WebResourceError?) {
                         Log.e("HdPornFull", "WebView error: ${error?.description}")
                     }
@@ -343,6 +361,110 @@ class HdPornFull : MainAPI() {
                         webView.destroy()
                     }
                 }, maxWaitMs + 5000)
+            }
+        }
+    }
+
+    /**
+     * Shows a manual Cloudflare bypass dialog with a visible WebView.
+     * User can interact with the page to solve the challenge (checkbox, slider, etc.).
+     * Returns the page HTML after user clicks "Done" or when challenge appears to be cleared.
+     */
+    @SuppressLint("SetJavaScriptEnabled", "JavascriptInterface")
+    private suspend fun showManualBypassDialog(pageUrl: String): String? {
+        val context = runCatching {
+            Class.forName("android.app.ActivityThread")
+                .getMethod("currentApplication")
+                .invoke(null) as? Context
+        }.getOrNull() ?: return null
+
+        return suspendCancellableCoroutine { cont ->
+            Handler(Looper.getMainLooper()).post {
+                val webView = WebView(context).apply {
+                    settings.javaScriptEnabled = true
+                    settings.domStorageEnabled = true
+                    settings.userAgentString = browserHeaders.getValue("User-Agent")
+                    settings.loadsImagesAutomatically = true
+                    settings.blockNetworkLoads = false
+                    settings.setSupportZoom(true)
+                    settings.builtInZoomControls = true
+                    settings.displayZoomControls = false
+                }
+
+                // Container for WebView in dialog
+                val container = FrameLayout(context)
+                container.layoutParams = ViewGroup.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT
+                )
+                container.addView(webView)
+
+                val dialog = AlertDialog.Builder(context)
+                    .setTitle("Cloudflare Protection - Manual Bypass")
+                    .setMessage("Please solve the Cloudflare challenge below, then click 'Done' to continue.")
+                    .setView(container)
+                    .setPositiveButton("Done") { _, _ ->
+                        // User clicked Done - capture HTML
+                        webView.evaluateJavascript("document.documentElement.outerHTML") { html ->
+                            val decoded = runCatching {
+                                JSONObject("{\"v\":$html}").getString("v")
+                            }.getOrNull()
+                            if (decoded != null && decoded.length > 1000) {
+                                Log.d("HdPornFull", "Manual bypass success: ${decoded.length} chars")
+                                cont.resume(decoded)
+                            } else {
+                                Log.e("HdPornFull", "Manual bypass returned empty/small HTML")
+                                cont.resume(null)
+                            }
+                            webView.destroy()
+                        }
+                    }
+                    .setNegativeButton("Cancel") { _, _ ->
+                        Log.d("HdPornFull", "Manual bypass cancelled by user")
+                        cont.resume(null)
+                        webView.destroy()
+                    }
+                    .setOnCancelListener {
+                        Log.d("HdPornFull", "Manual bypass dialog dismissed")
+                        cont.resume(null)
+                        webView.destroy()
+                    }
+                    .create()
+
+                dialog.setOnShowListener {
+                    // Set dialog size to ~90% of screen
+                    val window = dialog.window
+                    window?.setLayout(
+                        (context.resources.displayMetrics.widthPixels * 0.9).toInt(),
+                        (context.resources.displayMetrics.heightPixels * 0.9).toInt()
+                    )
+                }
+
+                webView.webViewClient = object : WebViewClient() {
+                    override fun onPageFinished(view: WebView, url: String?) {
+                        Log.d("HdPornFull", "Manual WebView onPageFinished: $url")
+                        // Mute any media
+                        view.evaluateJavascript(
+                            "document.querySelectorAll('video,audio').forEach(function(e){try{e.muted=true;e.volume=0;}catch(x){}});",
+                            null
+                        )
+                    }
+
+                    override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: WebResourceError?) {
+                        Log.e("HdPornFull", "Manual WebView error: ${error?.description}")
+                    }
+                }
+
+                webView.webChromeClient = object : WebChromeClient() {
+                    override fun onProgressChanged(view: WebView, newProgress: Int) {
+                        if (newProgress == 100) {
+                            dialog.setMessage("Challenge loaded. Please solve it and click 'Done'.")
+                        }
+                    }
+                }
+
+                dialog.show()
+                webView.loadUrl(pageUrl, browserHeaders)
             }
         }
     }
