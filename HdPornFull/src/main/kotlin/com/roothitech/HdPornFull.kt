@@ -55,37 +55,14 @@ class HdPornFull(private val activity: android.app.Activity) : MainAPI() {
      * Fetches [url] over HTTP first. If the response is a Cloudflare block
      * (403 / challenge page) or [usable] rejects the parsed document, the page
      * is rendered in a WebView and that HTML is parsed instead.
-     * If headless WebView also fails, offers manual bypass dialog.
+     * For hdpornfull.com, we show manual bypass dialog immediately since Cloudflare
+     * consistently blocks automated requests.
      */
     private suspend fun fetchDocument(url: String, usable: (Document) -> Boolean): Document? {
-        val httpDoc = runCatching {
-            val response = app.get(url, headers = browserHeaders)
-            if (response.code == 403 || response.code == 503) null else response.document
-        }.getOrNull()
-
-        // Check if HTTP result is valid
-        if (httpDoc != null) {
-            val isChallenge = httpDoc.isChallenge()
-            val isUsable = usable(httpDoc)
-            Log.d("HdPornFull", "HTTP fetch for $url: code=${runCatching { app.get(url, headers = browserHeaders).code }.getOrNull()}, challenge=$isChallenge, usable=$isUsable, title='${httpDoc.title()}'")
-            if (!isChallenge && isUsable) return httpDoc
-        }
-
-        Log.d("HdPornFull", "HTTP fetch blocked or unusable for $url; trying headless WebView")
-        var html = getRenderedHtmlViaWebView(url)
-        if (html != null) {
-            val webDoc = runCatching { Jsoup.parse(html, url) }.getOrNull()
-            if (webDoc != null) {
-                val isChallenge = webDoc.isChallenge()
-                val isUsable = usable(webDoc)
-                Log.d("HdPornFull", "Headless WebView fetch for $url: challenge=$isChallenge, usable=$isUsable, title='${webDoc.title()}'")
-                if (!isChallenge && isUsable) return webDoc
-            }
-        }
-
-        // If headless WebView fails, try manual bypass dialog
-        Log.d("HdPornFull", "Headless WebView failed for $url; showing manual Cloudflare bypass dialog")
-        html = showManualBypassDialog(url) ?: return httpDoc
+        // For hdpornfull.com, skip HTTP and headless WebView - go straight to manual bypass
+        // This saves time since Cloudflare consistently blocks automated requests
+        Log.d("HdPornFull", "Showing manual Cloudflare bypass dialog immediately for $url")
+        val html = showManualBypassDialog(url) ?: return null
         val manualDoc = runCatching { Jsoup.parse(html, url) }.getOrNull()
         if (manualDoc != null) {
             val isChallenge = manualDoc.isChallenge()
@@ -93,7 +70,7 @@ class HdPornFull(private val activity: android.app.Activity) : MainAPI() {
             Log.d("HdPornFull", "Manual bypass result for $url: challenge=$isChallenge, usable=$isUsable, title='${manualDoc.title()}'")
             if (!isChallenge && isUsable) return manualDoc
         }
-        return httpDoc
+        return null
     }
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
@@ -395,23 +372,11 @@ class HdPornFull(private val activity: android.app.Activity) : MainAPI() {
 
                 val dialog = AlertDialog.Builder(context)
                     .setTitle("Cloudflare Protection - Manual Bypass")
-                    .setMessage("Please solve the Cloudflare challenge below, then click 'Done' to continue.")
+                    .setMessage("Please solve the Cloudflare challenge below. It will auto-continue when cleared.")
                     .setView(container)
                     .setPositiveButton("Done") { _, _ ->
                         // User clicked Done - capture HTML
-                        webView.evaluateJavascript("document.documentElement.outerHTML") { html ->
-                            val decoded = runCatching {
-                                JSONObject("{\"v\":$html}").getString("v")
-                            }.getOrNull()
-                            if (decoded != null && decoded.length > 1000) {
-                                Log.d("HdPornFull", "Manual bypass success: ${decoded.length} chars")
-                                cont.resume(decoded)
-                            } else {
-                                Log.e("HdPornFull", "Manual bypass returned empty/small HTML")
-                                cont.resume(null)
-                            }
-                            webView.destroy()
-                        }
+                        captureHtml()
                     }
                     .setNegativeButton("Cancel") { _, _ ->
                         Log.d("HdPornFull", "Manual bypass cancelled by user")
@@ -425,12 +390,61 @@ class HdPornFull(private val activity: android.app.Activity) : MainAPI() {
                     }
                     .create()
 
+                // Auto-detect when Cloudflare challenge is cleared
+                fun captureHtml() {
+                    webView.evaluateJavascript("document.documentElement.outerHTML") { html ->
+                        val decoded = runCatching {
+                            JSONObject("{\"v\":$html}").getString("v")
+                        }.getOrNull()
+                        if (decoded != null && decoded.length > 1000) {
+                            val doc = Jsoup.parse(decoded, pageUrl)
+                            if (!doc.isChallenge()) {
+                                Log.d("HdPornFull", "Manual bypass success (auto): ${decoded.length} chars")
+                                cont.resume(decoded)
+                                webView.destroy()
+                                dialog.dismiss()
+                            } else {
+                                Log.d("HdPornFull", "Challenge still present, waiting...")
+                            }
+                        } else {
+                            Log.e("HdPornFull", "Manual bypass returned empty/small HTML")
+                        }
+                    }
+                }
+
+                // Poll for challenge clearance
+                fun startPolling() {
+                    Handler(Looper.getMainLooper()).postDelayed({
+                        if (cont.isActive && dialog.isShowing) {
+                            webView.evaluateJavascript(
+                                "(function(){" +
+                                    "var isChallenge = document.title.toLowerCase().includes('just a moment') || " +
+                                    "document.body.innerText.toLowerCase().includes('verify you are human') || " +
+                                    "document.querySelector('iframe[src*=\"challenges.cloudflare.com\"]') !== null || " +
+                                    "document.querySelector('#challenge-form') !== null || " +
+                                    "document.querySelector('#cf-challenge-running') !== null;" +
+                                    "return isChallenge ? 'challenge' : 'cleared';" +
+                                "})()"
+                            ) { result ->
+                                if (cont.isActive && dialog.isShowing) {
+                                    if (result?.contains("cleared") == true) {
+                                        Log.d("HdPornFull", "Challenge auto-detected as cleared")
+                                        captureHtml()
+                                    } else {
+                                        startPolling() // Continue polling
+                                    }
+                                }
+                            }
+                        }
+                    }, 3000) // Check every 3 seconds
+                }
+
                 dialog.setOnShowListener {
-                    // Set dialog size to ~90% of screen
+                    // Set dialog size to ~50% of screen
                     val window = dialog.window
                     window?.setLayout(
-                        (context.resources.displayMetrics.widthPixels * 0.9).toInt(),
-                        (context.resources.displayMetrics.heightPixels * 0.9).toInt()
+                        (context.resources.displayMetrics.widthPixels * 0.5).toInt(),
+                        (context.resources.displayMetrics.heightPixels * 0.5).toInt()
                     )
                 }
 
@@ -442,6 +456,8 @@ class HdPornFull(private val activity: android.app.Activity) : MainAPI() {
                             "document.querySelectorAll('video,audio').forEach(function(e){try{e.muted=true;e.volume=0;}catch(x){}});",
                             null
                         )
+                        // Start polling for challenge clearance
+                        startPolling()
                     }
 
                     override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: WebResourceError?) {
@@ -452,7 +468,7 @@ class HdPornFull(private val activity: android.app.Activity) : MainAPI() {
                 webView.webChromeClient = object : WebChromeClient() {
                     override fun onProgressChanged(view: WebView, newProgress: Int) {
                         if (newProgress == 100) {
-                            dialog.setMessage("Challenge loaded. Please solve it and click 'Done'.")
+                            dialog.setMessage("Challenge loaded. Please solve it - will auto-continue when cleared.")
                         }
                     }
                 }
