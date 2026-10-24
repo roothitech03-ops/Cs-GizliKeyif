@@ -24,6 +24,16 @@ import com.lagradost.cloudstream3.utils.*
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlin.coroutines.resume
 
+// Singleton to hold persistent session state across all HdPornFull instances
+object HdPornFullSession {
+    @SuppressLint("StaticFieldLeak")
+    var persistentWebView: WebView? = null
+    var isSessionReady = false
+    val initLock = Any()
+    var savedUserAgent: String? = null
+    var savedContext: Context? = null
+}
+
 class HdPornFull(private val activity: android.app.Activity) : MainAPI() {
     override var mainUrl = "https://www.hdpornfull.com"
     override var name = "HdPornFull"
@@ -39,40 +49,17 @@ class HdPornFull(private val activity: android.app.Activity) : MainAPI() {
         "Accept-Language" to "en-US,en;q=0.9"
     )
 
-    // Persistent WebView & cookies - survives across fetchDocument calls
-    companion object {
-        @SuppressLint("StaticFieldLeak")
-        private var persistentWebView: WebView? = null
-        private var isSessionReady = false
-        private val initLock = Any()
-        
-        // These will be set by the first instance
-        private var savedUserAgent: String? = null
-        private var savedContext: Context? = null
-        
-        // Public accessors for instance methods
-        fun getPersistentWebView(): WebView? = persistentWebView
-        fun setPersistentWebView(webView: WebView) { persistentWebView = webView }
-        fun getIsSessionReady(): Boolean = isSessionReady
-        fun setIsSessionReady(ready: Boolean) { isSessionReady = ready }
-        fun getSavedUserAgent(): String? = savedUserAgent
-        fun setSavedUserAgent(ua: String) { savedUserAgent = ua }
-        fun getSavedContext(): Context? = savedContext
-        fun setSavedContext(ctx: Context) { savedContext = ctx }
-        fun getInitLock(): Any = initLock
-    }
-
     private fun ensurePersistentWebView(): WebView {
-        return HdPornFull.getPersistentWebView() ?: synchronized(HdPornFull.getInitLock()) {
-            HdPornFull.getPersistentWebView() ?: run {
+        return HdPornFullSession.persistentWebView ?: synchronized(HdPornFullSession.initLock) {
+            HdPornFullSession.persistentWebView ?: run {
                 // Initialize static fields from this instance if not set
-                if (HdPornFull.getSavedUserAgent() == null) HdPornFull.setSavedUserAgent(browserHeaders.getValue("User-Agent"))
-                if (HdPornFull.getSavedContext() == null) HdPornFull.setSavedContext(activity.applicationContext)
+                if (HdPornFullSession.savedUserAgent == null) HdPornFullSession.savedUserAgent = browserHeaders.getValue("User-Agent")
+                if (HdPornFullSession.savedContext == null) HdPornFullSession.savedContext = activity.applicationContext
                 
-                WebView(HdPornFull.getSavedContext()!!).apply {
+                WebView(HdPornFullSession.savedContext!!).apply {
                     settings.javaScriptEnabled = true
                     settings.domStorageEnabled = true
-                    settings.userAgentString = HdPornFull.getSavedUserAgent()!!
+                    settings.userAgentString = HdPornFullSession.savedUserAgent!!
                     settings.loadsImagesAutomatically = true
                     settings.blockNetworkLoads = false
                     settings.setSupportZoom(true)
@@ -81,7 +68,7 @@ class HdPornFull(private val activity: android.app.Activity) : MainAPI() {
                     // Enable cookie persistence
                     CookieManager.getInstance().setAcceptCookie(true)
                     CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
-                }.also { HdPornFull.setPersistentWebView(it) }
+                }.also { HdPornFullSession.persistentWebView = it }
             }
         }
     }
@@ -138,7 +125,7 @@ class HdPornFull(private val activity: android.app.Activity) : MainAPI() {
         }
 
         // 2. Try persistent WebView (headless) - reuses session/cookies
-        if (HdPornFull.getIsSessionReady()) {
+        if (HdPornFullSession.isSessionReady) {
             Log.d("HdPornFull", "Using persistent WebView session for $url")
             val html = getRenderedHtmlViaPersistentWebView(url, webView)
             if (html != null) {
@@ -153,7 +140,7 @@ class HdPornFull(private val activity: android.app.Activity) : MainAPI() {
         }
 
         // 3. Only show manual dialog ONCE per session
-        if (!HdPornFull.getIsSessionReady()) {
+        if (!HdPornFullSession.isSessionReady) {
             Log.d("HdPornFull", "Session not ready - showing manual bypass dialog for $url")
             val html = showManualBypassDialog(url, webView) ?: return null
             val manualDoc = runCatching { Jsoup.parse(html, url) }.getOrNull()
@@ -162,7 +149,7 @@ class HdPornFull(private val activity: android.app.Activity) : MainAPI() {
                 val isUsable = usable(manualDoc)
                 Log.d("HdPornFull", "Manual bypass result for $url: challenge=$isChallenge, usable=$isUsable, title='${manualDoc.title()}'")
                 if (!isChallenge && isUsable) {
-                    HdPornFull.setIsSessionReady(true) // Mark session ready - no more dialogs!
+                    HdPornFullSession.isSessionReady = true // Mark session ready - no more dialogs!
                     Log.d("HdPornFull", "Cloudflare session established - future requests will use persistent WebView")
                     return manualDoc
                 }
