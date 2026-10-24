@@ -370,26 +370,6 @@ class HdPornFull(private val activity: android.app.Activity) : MainAPI() {
                 )
                 container.addView(webView)
 
-                val dialog = AlertDialog.Builder(context)
-                    .setTitle("Cloudflare Protection - Manual Bypass")
-                    .setMessage("Please solve the Cloudflare challenge below. It will auto-continue when cleared.")
-                    .setView(container)
-                    .setPositiveButton("Done") { _, _ ->
-                        // User clicked Done - capture HTML
-                        captureHtml()
-                    }
-                    .setNegativeButton("Cancel") { _, _ ->
-                        Log.d("HdPornFull", "Manual bypass cancelled by user")
-                        cont.resume(null)
-                        webView.destroy()
-                    }
-                    .setOnCancelListener {
-                        Log.d("HdPornFull", "Manual bypass dialog dismissed")
-                        cont.resume(null)
-                        webView.destroy()
-                    }
-                    .create()
-
                 // Auto-detect when Cloudflare challenge is cleared
                 fun captureHtml() {
                     webView.evaluateJavascript("document.documentElement.outerHTML") { html ->
@@ -438,6 +418,26 @@ class HdPornFull(private val activity: android.app.Activity) : MainAPI() {
                         }
                     }, 3000) // Check every 3 seconds
                 }
+
+                val dialog = AlertDialog.Builder(context)
+                    .setTitle("Cloudflare Protection - Manual Bypass")
+                    .setMessage("Please solve the Cloudflare challenge below. It will auto-continue when cleared.")
+                    .setView(container)
+                    .setPositiveButton("Done") { _, _ ->
+                        // User clicked Done - capture HTML
+                        captureHtml()
+                    }
+                    .setNegativeButton("Cancel") { _, _ ->
+                        Log.d("HdPornFull", "Manual bypass cancelled by user")
+                        cont.resume(null)
+                        webView.destroy()
+                    }
+                    .setOnCancelListener {
+                        Log.d("HdPornFull", "Manual bypass dialog dismissed")
+                        cont.resume(null)
+                        webView.destroy()
+                    }
+                    .create()
 
                 dialog.setOnShowListener {
                     // Set dialog size to ~50% of screen
