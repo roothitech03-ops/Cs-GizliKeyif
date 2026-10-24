@@ -22,7 +22,7 @@ import com.lagradost.cloudstream3.utils.*
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlin.coroutines.resume
 
-class HdPornFull : MainAPI() {
+class HdPornFull(private val activity: android.app.Activity) : MainAPI() {
     override var mainUrl = "https://www.hdpornfull.com"
     override var name = "HdPornFull"
     override val hasMainPage = true
@@ -284,11 +284,8 @@ class HdPornFull : MainAPI() {
      */
     @SuppressLint("SetJavaScriptEnabled")
     private suspend fun getRenderedHtmlViaWebView(pageUrl: String): String? {
-        val context = runCatching {
-            Class.forName("android.app.ActivityThread")
-                .getMethod("currentApplication")
-                .invoke(null) as? Context
-        }.getOrNull() ?: return null
+        // Use the Activity passed from plugin for valid context
+        val context = activity ?: return null
 
         return suspendCancellableCoroutine { cont ->
             Handler(Looper.getMainLooper()).post {
@@ -372,11 +369,8 @@ class HdPornFull : MainAPI() {
      */
     @SuppressLint("SetJavaScriptEnabled", "JavascriptInterface")
     private suspend fun showManualBypassDialog(pageUrl: String): String? {
-        val context = runCatching {
-            Class.forName("android.app.ActivityThread")
-                .getMethod("currentApplication")
-                .invoke(null) as? Context
-        }.getOrNull() ?: return null
+        // Use the Activity passed from plugin for valid window token
+        val context = activity ?: return null
 
         return suspendCancellableCoroutine { cont ->
             Handler(Looper.getMainLooper()).post {
