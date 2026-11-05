@@ -75,11 +75,8 @@ class HdpornfullProvider : MainAPI() {
             ?: img?.attr("alt")?.takeIf { it.isNotBlank() }
             ?: return null
 
-        val quality = Regex("""(\d{3,4})p""").find(selectFirst(SEL.CARD_DUR)?.text() ?: "")?.groupValues?.get(1)?.toIntOrNull()
-
         return newMovieSearchResponse(title, fixedHref, TvType.NSFW) {
             this.posterUrl = poster?.let { if (it.startsWith("http")) it else mainUrl + it }
-            this.quality = quality ?: com.lagradost.cloudstream3.utils.Qualities.Unknown.value
         }
     }
 
