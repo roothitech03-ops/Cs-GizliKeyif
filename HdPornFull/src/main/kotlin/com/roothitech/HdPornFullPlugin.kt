@@ -1,4 +1,4 @@
-package roothitech
+package com.roothitech
 
 /**
  * The object the host registers. Thin glue — delegates to extractor.
