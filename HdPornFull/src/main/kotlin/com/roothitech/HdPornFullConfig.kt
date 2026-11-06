@@ -1,4 +1,4 @@
-package roothitech
+package com.roothitech
 
 /**
  * Host injects this at init. Nothing hardcoded in ProviderPlugin.
